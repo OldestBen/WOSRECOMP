@@ -18,10 +18,11 @@ option(WOSRECOMP_BUILD_TOOLS "Build XenonRecomp/XenosRecomp toolchain" ON)
 if(WOSRECOMP_BUILD_TOOLS)
     add_subdirectory(tools/XenonRecomp)
 
-    # XenosRecomp depends on DirectXShaderCompiler and is primarily
-    # developed/tested on Windows; keep it optional so a Linux/macOS
-    # configure of the CPU-code toolchain doesn't hard-fail on it.
-    option(WOSRECOMP_BUILD_XENOS "Build XenosRecomp (shader recompiler)" OFF)
+    # Builds fine cross-platform (verified on Linux via the bundled dxc-bin
+    # submodule). Kept as a separate option since it's not needed until
+    # Phase 4 (docs/04-roadmap.md) — disable if you want a faster configure
+    # of just the CPU-code path.
+    option(WOSRECOMP_BUILD_XENOS "Build XenosRecomp (shader recompiler)" ON)
     if(WOSRECOMP_BUILD_XENOS)
         add_subdirectory(tools/XenosRecomp)
     endif()

@@ -53,10 +53,11 @@ Build complete.
   XenonRecomp  : tools/XenonRecomp/build/XenonRecomp/XenonRecomp
   XenosRecomp  : tools/XenosRecomp/build/XenosRecomp/XenosRecomp
 
-Note: XenosRecomp (shader recompiler) links against DirectXShaderCompiler and
-is primarily developed/tested on Windows. If it fails to build on Linux/macOS
-right now, that's OK — it's not needed until Phase 4 (docs/04-roadmap.md).
-XenonAnalyse/XenonRecomp (the CPU code path) are what you need first.
+Note: XenosRecomp (shader recompiler) isn't needed until Phase 4
+(docs/04-roadmap.md) — XenonAnalyse/XenonRecomp (the CPU code path) are what
+you need first. It builds fine cross-platform via the bundled dxc-bin
+submodule (verified on Linux), but if it ever fails to build for you, that's
+not a blocker for early phases.
 
 Next: see docs/01-getting-started.md step 4 onward.
 EOF
