@@ -20,6 +20,13 @@ WoSRecompLib/ppc/*.h
 WoSRecompLib/ppc/*.inc
 WoSRecompLib/shaders/generated/
 
+# Run logs (tools/run_logged.sh). Raw logs can be enormous, so they stay
+# local; the generated *.summary.md files ARE committed and are what gets
+# shared. Note this deliberately ignores "logs/*.log" rather than "logs/",
+# so summaries pass through without needing a negation (a "dir/" pattern
+# can't be un-excluded by a later "!dir/file" rule — see private/* above).
+logs/*.log
+
 # Build artifacts
 build/
 out/

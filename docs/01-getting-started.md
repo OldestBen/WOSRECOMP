@@ -66,6 +66,12 @@ source comments for details):
 Binaries land in each tool's own `build/` directory under `tools/` — see the
 summary `build_tools.sh` prints at the end.
 
+**Tip:** run anything long or failure-prone through
+[`tools/run_logged.sh`](../tools/run_logged.sh) instead of bare, e.g.
+`tools/run_logged.sh build -- ./tools/build_tools.sh`. It captures the full
+output to `logs/` and writes a compact, deduplicated `.summary.md` that's
+committed and easy to share — see [`logs/README.md`](../logs/README.md).
+
 ## 4. Get your XEX
 
 You need to dump *your own* legally owned Xbox 360 copy of Web of Shadows.

@@ -44,6 +44,7 @@ WOSRECOMP/
 │   ├── docker/              # ours — no-Homebrew-needed dev container (see its README)
 │   ├── build_tools.sh      # builds all of the above
 │   ├── import_dump.sh      # ingests your extracted dump into private/
+│   ├── run_logged.sh       # runs a command, captures log + compact summary
 │   └── recompile.sh        # runs the analyse → recompile pipeline for WoS
 ├── WoSRecompLib/
 │   ├── config/
