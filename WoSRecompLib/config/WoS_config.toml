@@ -1,0 +1,76 @@
+# ============================================================================
+#  Spider-Man: Web of Shadows — XenonRecomp configuration
+# ============================================================================
+#  See docs/02-config-guide.md for a full field-by-field explanation.
+#
+#  Every 0x00000000 placeholder below MUST be replaced with a real address
+#  found in WoS's own default.xex. The structure/fields themselves come
+#  straight from the upstream XenonRecomp README:
+#  https://github.com/hedge-dev/XenonRecomp
+# ============================================================================
+
+[main]
+file_path = "../../private/default.xex"
+# patch_file_path = "../../private/default.xexp"           # uncomment if you have a title update
+# patched_file_path = "../../private/default_patched.xex"  # uncomment if using patch_file_path
+out_directory_path = "../ppc"
+switch_table_file_path = "WoS_switch_tables.toml"
+
+# ----------------------------------------------------------------------------
+# Optimization flags — leave everything false until you have a working build.
+# ----------------------------------------------------------------------------
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# ----------------------------------------------------------------------------
+# Register save/restore helper functions (compiler-emitted, Xenon ABI).
+# REQUIRED. Find these by disassembling default.xex — see docs/02-config-guide.md
+# for how to identify them.
+# ----------------------------------------------------------------------------
+restgprlr_14_address = 0x00000000  # TODO
+savegprlr_14_address = 0x00000000  # TODO
+restfpr_14_address   = 0x00000000  # TODO
+savefpr_14_address   = 0x00000000  # TODO
+restvmx_14_address   = 0x00000000  # TODO
+savevmx_14_address   = 0x00000000  # TODO
+restvmx_64_address   = 0x00000000  # TODO
+savevmx_64_address   = 0x00000000  # TODO
+
+# ----------------------------------------------------------------------------
+# setjmp / longjmp — optional, but recommended once located.
+# ----------------------------------------------------------------------------
+# longjmp_address = 0x00000000  # TODO
+# setjmp_address  = 0x00000000  # TODO
+
+# ----------------------------------------------------------------------------
+# Explicit function boundary overrides.
+# Add entries here whenever the analyser mis-detects a function's start/size.
+# ----------------------------------------------------------------------------
+functions = [
+    # { address = 0x82XXXXXX, size = 0xNN },
+]
+
+# ----------------------------------------------------------------------------
+# Invalid instruction skips.
+# Non-code data embedded in .text (padding, exception frame tables, etc.)
+# ----------------------------------------------------------------------------
+invalid_instructions = [
+    { data = 0x00000000, size = 4 },  # example: padding — replace/remove
+]
+
+# ----------------------------------------------------------------------------
+# Mid-asm hooks.
+# This is how WoSRecomp/ runtime code gets spliced into recompiled game code
+# (graphics calls, save I/O, audio, etc). Add one [[midasm_hook]] block per
+# injection point as you discover the need for them during bring-up.
+# ----------------------------------------------------------------------------
+# [[midasm_hook]]
+# name = "ExampleMidAsmHook"
+# address = 0x00000000
+# registers = ["r3"]

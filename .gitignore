@@ -1,0 +1,39 @@
+# ==========================================================================
+#  COPYRIGHTED GAME FILES — NEVER COMMIT THESE
+# ==========================================================================
+# You must dump these from your OWN copy of the Xbox 360 game.
+# They must never be committed or distributed with this repository.
+private/
+*.xex
+*.xexp
+*.iso
+*.god
+*.xcp
+default_patched.xex
+
+# Generated recompiler output (regenerated from your XEX — not source)
+WoSRecompLib/ppc/*.cpp
+WoSRecompLib/ppc/*.h
+WoSRecompLib/ppc/*.inc
+WoSRecompLib/shaders/generated/
+
+# Build artifacts
+build/
+out/
+cmake-build-*/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+
+# Editor / OS cruft
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# But DO keep the placeholder READMEs / .gitkeep files in those dirs
+!private/README.md
+!WoSRecompLib/ppc/.gitkeep
