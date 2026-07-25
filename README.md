@@ -59,7 +59,8 @@ WOSRECOMP/
 │   ├── 02-config-guide.md
 │   ├── 03-runtime-architecture.md
 │   ├── 04-roadmap.md
-│   └── 05-findings-log.md   # WoS-specific data found so far (addresses, XEX info) — paste outputs here
+│   ├── 05-findings-log.md   # WoS-specific data found so far (addresses, XEX info) — paste outputs here
+│   └── sessions/            # per-session logs: dead ends, ruled-out approaches, unverified claims
 └── CMakeLists.txt
 ```
 

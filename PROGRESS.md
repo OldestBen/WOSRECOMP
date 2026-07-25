@@ -8,10 +8,21 @@ Format: a **Current State** summary (rewritten in place, always reflects
 "now"), then a reverse-chronological **Log** of dated entries (append-only,
 never edited after the fact — corrections get a new entry).
 
-This file tracks *project/tooling* state (what code changed, why, what's
-built). For WoS-specific technical findings (XEX addresses, region info,
-`xex_info` output), see [`docs/05-findings-log.md`](docs/05-findings-log.md)
-instead — that's the durable place for data pasted from chat.
+## How the records are layered
+
+Read top-down, stop when you know enough. **This file's Current State
+section is the single authority on what's true now** — if anything else
+contradicts it, this wins and the other is stale history.
+
+| Layer | Where | Content |
+|---|---|---|
+| 1. Orientation | **This file** § Current State | What's true right now. Rewritten in place. |
+| 2. Durable record | **This file** § Log · [`docs/05-findings-log.md`](docs/05-findings-log.md) | Dated project changes; WoS technical data with provenance. Appended. |
+| 3. Detail | [`docs/sessions/`](docs/sessions/) | Per-session blow-by-blow, incl. dead ends and unverified claims. One file per session. |
+
+You should never need layer 3 to get oriented — it's for digging into a
+specific past episode. Its conventions (and why dead ends matter more than
+successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ---
 
@@ -62,6 +73,31 @@ instead — that's the durable place for data pasted from chat.
 ---
 
 ## Log
+
+### 2026-07-25 — Session-log layer added; record-keeping formalised
+
+- Added `docs/sessions/` (one file per session) plus
+  `docs/sessions/README.md` documenting conventions, and backfilled
+  `docs/sessions/2026-07-25.md` for this session as the first real entry.
+- Resolves an open question about whether to keep one rolling log or one
+  file per session: **both, layered.** Per-session files alone would give
+  isolation but destroy orientation (you'd read N files to reconstruct
+  state); a single "refreshing" file alone would keep orientation but lose
+  the history that stops you re-walking dead ends. So: layer 1 (this
+  file's Current State) is rewritten and authoritative for *now*; layers 2
+  and 3 are append-only history.
+- Core rule established: **exactly one file is authoritative for the
+  present**, everything else is self-evidently dated history and is never
+  edited after the fact (corrections go in newer entries). Stale info that
+  looks authoritative is the failure mode this whole system exists to
+  prevent.
+- Rationale for going beyond PR history: git records what changed *and
+  succeeded*. It structurally cannot record dead ends, ruled-out
+  approaches, or abandoned work — none of which ever gets committed — and
+  those are the expensive things to rediscover. Session logs therefore
+  weight **negative results** highest, and carry an explicit "unverified
+  claims" section so untested assertions don't silently harden into
+  assumed-good.
 
 ### 2026-07-25 — Docker dev environment added (user has no Homebrew)
 
