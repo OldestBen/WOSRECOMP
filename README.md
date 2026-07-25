@@ -97,9 +97,12 @@ git submodule update --init --recursive
 
 ## Status
 
-🔴 **Scaffold stage.** Toolchain imported, structure and docs in place. Nothing has
-been recompiled yet. The immediate next task is building the tools and producing a
-first analyse pass on a real XEX — see [`docs/04-roadmap.md`](docs/04-roadmap.md).
+🔴 **Scaffold stage.** Toolchain imported and verified building end-to-end. Structure
+and docs in place. Nothing game-specific has been recompiled yet. See
+[`PROGRESS.md`](PROGRESS.md) for the up-to-date current state and a running devlog —
+**read that first** in any new session before digging through commit history. The
+immediate next task is building the tools and producing a first analyse pass on a
+real XEX — see [`docs/04-roadmap.md`](docs/04-roadmap.md).
 
 ## Credits & references
 
