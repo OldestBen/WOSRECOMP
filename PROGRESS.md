@@ -36,8 +36,8 @@ instead — that's the durable place for data pasted from chat.
   folder (`wos/`) on their own machine — not yet run through
   `import_dump.sh` or shared back into this session.
 - **Blocked on:** user running `tools/import_dump.sh` against their `wos/`
-  folder on their own Mac (testing there; Windows workstation not currently
-  available) and sharing the resulting tree + `xex_info` output →
+  folder — now via `tools/docker/` (no Homebrew on their Mac; using Docker
+  Desktop instead) — and sharing the resulting tree + `xex_info` output →
   address-hunting in the XEX (docs/02-config-guide.md) can't start until
   then.
 - **Findings log:** `docs/05-findings-log.md` added as the durable place to
@@ -62,6 +62,29 @@ instead — that's the durable place for data pasted from chat.
 ---
 
 ## Log
+
+### 2026-07-25 — Docker dev environment added (user has no Homebrew)
+
+- User doesn't have Homebrew on their Mac and has Docker Desktop instead.
+  Added `tools/docker/Dockerfile` + `tools/docker/README.md`: a container
+  built on Ubuntu 24.04 + Clang 18 + CMake + Ninja — the exact package
+  combination already proven to build this project natively (this sandbox).
+  Workflow: bind-mount an empty host folder to `/workspace` and the user's
+  extracted `wos` dump (read-only) to `/wos`, clone+build+
+  `import_dump.sh` inside the container, with all output persisting on the
+  host via the bind mount (not lost when the container exits).
+- **Honesty note on testing:** attempted to actually build the image in
+  this sandbox to verify it end-to-end (got the Docker daemon itself
+  running here, which worked), but the sandbox's egress policy blocks
+  Docker Hub's CDN (`production.cloudfront.docker.com` — confirmed via
+  `curl .../__agentproxy/status`, a 403 policy denial, not a bug). Per the
+  proxy's own guidance, policy denials aren't something to route around, so
+  the image build itself is untested by me. Confidence is still high since
+  it's the identical package set verified natively, but this should be
+  flagged as unverified until the user's own Docker Desktop (normal
+  internet access) builds it successfully.
+- Wired the Docker option into `docs/01-getting-started.md` (prerequisites
+  section) and the root `README.md` file tree.
 
 ### 2026-07-25 — Findings log added; macOS confirmed as a valid dev platform
 
