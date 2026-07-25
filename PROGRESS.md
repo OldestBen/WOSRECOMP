@@ -12,26 +12,34 @@ never edited after the fact — corrections get a new entry).
 
 ## Current State
 
-- **Stage:** Scaffold + toolchain verified. No game-specific work started yet.
-- **Toolchain:** `XenonAnalyse`, `XenonRecomp`, `XenosRecomp` all build and run
-  cleanly via `./tools/build_tools.sh` (verified on Ubuntu 24.04, Clang 18.1.3,
-  CMake 3.28, in the cloud sandbox — not yet verified on the user's own
-  machine/OS).
+- **Stage:** Scaffold + toolchain verified, dump-ingestion tooling built. No
+  game-specific work started yet.
+- **Toolchain:** `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, `xex_info`, and
+  `extract-xiso` all build and run cleanly via `./tools/build_tools.sh`
+  (verified on Ubuntu 24.04, Clang 18.1.3, CMake 3.28, in the cloud sandbox —
+  not yet verified on the user's own machine/OS).
+- **Dump ingestion:** `tools/import_dump.sh <path>` is ready — finds
+  `default.xex`/`default.xexp` in a raw dump (flat or nested layouts, or a
+  `.iso` via `extract-xiso`), copies into `private/`, and prints a
+  non-copyrighted summary (directory tree + `xex_info` output) for sharing.
+  Tested against synthetic fixtures; not yet run against a real WoS dump.
 - **Config:** `WoSRecompLib/config/WoS_config.toml` is still the placeholder
   copied from XenonRecomp's Sonic Unleashed example — every address in it is
   `0x00000000` or a Unleashed-specific value and **must** be replaced with
   values found in WoS's own `default.xex`. Nothing has been recompiled yet.
-- **Game files:** Not yet in hand. User is extracting their own legally-owned
-  Xbox 360 disc. Blocking next step: get `default.xex` (+ any title update)
-  into `private/`, confirm region/edition.
-- **Blocked on:** disc extraction (user, in progress) → address-hunting in
-  the XEX (docs/02-config-guide.md) can't start until we have the binary.
+- **Game files:** Not yet in hand. User has extracted their disc into a local
+  folder (`wos/`) on their own machine — not yet run through
+  `import_dump.sh` or shared back into this session.
+- **Blocked on:** user running `tools/import_dump.sh` against their `wos/`
+  folder and sharing the resulting tree + `xex_info` output → address-hunting
+  in the XEX (docs/02-config-guide.md) can't start until then.
 
 ## Next Steps (in order)
 
-1. Get `default.xex` (and `default.xexp` if a title update exists) into
-   `private/`. Confirm region/edition (NTSC-U retail vs. Platinum Hits vs.
-   PAL vs. JP — these can differ in binary layout).
+1. User runs `tools/import_dump.sh <path-to-wos-folder>`, shares the printed
+   directory tree + `xex_info` output, and notes region/edition (NTSC-U
+   retail vs. Platinum Hits vs. PAL vs. JP — these can differ in binary
+   layout).
 2. Run `XenonAnalyse` against it to produce the first switch-table TOML.
 3. Find the 8 register save/restore function addresses (byte-pattern search,
    see `docs/02-config-guide.md`) and fill in `WoS_config.toml`.
@@ -43,6 +51,42 @@ never edited after the fact — corrections get a new entry).
 ---
 
 ## Log
+
+### 2026-07-25 — Dump-ingestion tooling: xex_info, extract-xiso, import_dump.sh
+
+- Added `tools/xex_info`, a small standalone C++ tool (not upstream — ours)
+  that prints a XEX's base address, entry point, and section layout by
+  reusing XenonUtils' own `Image::ParseImage`/`Xex2LoadImage` loader.
+  Deliberately built as its own standalone CMake project (pulls in
+  `XenonUtils`'s sources directly from `tools/XenonRecomp/XenonUtils`)
+  rather than sharing a CMake target with `tools/XenonRecomp`, to avoid
+  cross-project target collisions and keep it buildable independently via
+  the same `build_one` pattern `build_tools.sh` already used.
+- **Bug found & fixed:** the upstream XEX loader trusts header-declared
+  offsets/counts without validating them against the actual file size —
+  feeding it a truncated/corrupted file segfaults instead of erroring.
+  Added bounds validation in `xex_info/main.cpp` (checks `headerSize`,
+  `securityOffset`, and `headerCount` against the file size before calling
+  into the upstream parser) so a bad dump fails with a clear message
+  instead of crashing. Verified via a synthetic truncated-XEX fixture
+  (segfault → clean error after the fix).
+- Added [`XboxDev/extract-xiso`](https://github.com/XboxDev/extract-xiso) as
+  a submodule under `tools/extract-xiso` — unpacks Xbox `.iso`/XISO disc
+  images. Checked its license first: modified BSD (permissive,
+  redistributable) — appropriate to bundle.
+- Added `tools/import_dump.sh <path>`: given a raw extracted folder or a
+  `.iso`, finds `default.xex`/`default.xexp` regardless of layout (flat
+  XISO-style or nested GOD-style content folders), copies them into
+  `private/` (never touches the original), and prints a directory tree
+  (filenames/sizes only) plus `xex_info` output — all safe, non-copyrighted
+  metadata meant to be pasted back into chat. Tested against synthetic flat
+  and nested fixtures, a truncated-XEX fixture, and a no-XEX-found case; all
+  behave correctly. Cleaned up all test fixtures/artifacts afterward — no
+  test data left in `private/` or `/tmp`.
+- Updated `docs/01-getting-started.md`, `README.md`, `private/README.md` to
+  document the new tools and recommend `import_dump.sh` as the default path
+  for getting a dump into the repo, with manual placement kept as a
+  fallback.
 
 ### 2026-07-25 — Toolchain build verified end-to-end
 

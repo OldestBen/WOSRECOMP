@@ -28,6 +28,12 @@ if(WOSRECOMP_BUILD_TOOLS)
     endif()
 endif()
 
+# tools/xex_info is intentionally NOT added here: it's a standalone CMake
+# project (see tools/xex_info/CMakeLists.txt) that pulls in XenonUtils'
+# sources directly, so it can't share a configure with tools/XenonRecomp
+# above without an "XenonUtils target already exists" collision. It's built
+# independently by tools/build_tools.sh, same as XenonRecomp/XenosRecomp.
+
 # Future:
 # add_subdirectory(WoSRecompLib)
 # add_subdirectory(WoSRecomp)

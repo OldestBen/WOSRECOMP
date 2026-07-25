@@ -4,3 +4,6 @@
 [submodule "tools/XenosRecomp"]
 	path = tools/XenosRecomp
 	url = https://github.com/hedge-dev/XenosRecomp.git
+[submodule "tools/extract-xiso"]
+	path = tools/extract-xiso
+	url = https://github.com/XboxDev/extract-xiso.git

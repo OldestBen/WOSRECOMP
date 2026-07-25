@@ -3,7 +3,10 @@
 # ==========================================================================
 # You must dump these from your OWN copy of the Xbox 360 game.
 # They must never be committed or distributed with this repository.
-private/
+# NOTE: "private/*" (not "private/") so the !private/README.md negation
+# below actually works — git can't re-include a file inside a directory
+# that's excluded via a blanket "dir/" pattern, only via "dir/*".
+private/*
 *.xex
 *.xexp
 *.iso

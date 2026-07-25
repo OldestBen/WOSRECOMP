@@ -44,20 +44,28 @@ build_one() {
 
 build_one "XenonRecomp"
 build_one "XenosRecomp"
+build_one "xex_info"
+build_one "extract-xiso"
 
 cat <<EOF
 
 Build complete.
 
-  XenonAnalyse : tools/XenonRecomp/build/XenonAnalyse/XenonAnalyse
-  XenonRecomp  : tools/XenonRecomp/build/XenonRecomp/XenonRecomp
-  XenosRecomp  : tools/XenosRecomp/build/XenosRecomp/XenosRecomp
+  XenonAnalyse  : tools/XenonRecomp/build/XenonAnalyse/XenonAnalyse
+  XenonRecomp   : tools/XenonRecomp/build/XenonRecomp/XenonRecomp
+  XenosRecomp   : tools/XenosRecomp/build/XenosRecomp/XenosRecomp
+  xex_info      : tools/xex_info/build/xex_info
+  extract-xiso  : tools/extract-xiso/build/extract-xiso
 
 Note: XenosRecomp (shader recompiler) isn't needed until Phase 4
 (docs/04-roadmap.md) — XenonAnalyse/XenonRecomp (the CPU code path) are what
 you need first. It builds fine cross-platform via the bundled dxc-bin
 submodule (verified on Linux), but if it ever fails to build for you, that's
 not a blocker for early phases.
+
+xex_info and extract-xiso are our own additions (not upstream XenonRecomp) —
+see tools/import_dump.sh, which uses both to ingest a raw disc dump into
+private/.
 
 Next: see docs/01-getting-started.md step 4 onward.
 EOF

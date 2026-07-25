@@ -39,7 +39,10 @@ WOSRECOMP/
 ├── tools/
 │   ├── XenonRecomp/        # submodule — the PPC→C++ recompiler + XenonAnalyse
 │   ├── XenosRecomp/        # submodule — the Xenos shader → HLSL recompiler
-│   ├── build_tools.sh      # builds XenonAnalyse / XenonRecomp / XenosRecomp
+│   ├── extract-xiso/       # submodule — unpacks Xbox .iso/XISO disc images
+│   ├── xex_info/           # ours — prints a XEX's base/entry/section metadata
+│   ├── build_tools.sh      # builds all of the above
+│   ├── import_dump.sh      # ingests your extracted dump into private/
 │   └── recompile.sh        # runs the analyse → recompile pipeline for WoS
 ├── WoSRecompLib/
 │   ├── config/

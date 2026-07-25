@@ -26,9 +26,9 @@ If you already cloned this repo without `--recursive`:
 git submodule update --init --recursive
 ```
 
-This pulls down `tools/XenonRecomp` and `tools/XenosRecomp`, each with their own
-nested submodules (e.g. `simde` for VMX intrinsics on non-x86, capstone-derived
-disassembly bits, etc.).
+This pulls down `tools/XenonRecomp`, `tools/XenosRecomp`, and
+`tools/extract-xiso`, each with their own nested submodules (e.g. `simde` for
+VMX intrinsics on non-x86, capstone-derived disassembly bits, etc.).
 
 ## 3. Build the recompiler tools
 
@@ -42,31 +42,55 @@ This builds, from `tools/XenonRecomp`:
 - `XenonTests` — the project's own PPC instruction test suite (useful for
   sanity-checking your toolchain, not WoS-specific)
 
-and from `tools/XenosRecomp`:
+from `tools/XenosRecomp`:
 - The shader recompiler (needed later, once we're pulling Xenos shaders out of
   the game's compiled shader blobs and turning them into HLSL)
 
-Binaries land in `tools/XenonRecomp/build/` and `tools/XenosRecomp/build/` (or
-wherever your CMake build directory is configured — see the script).
+and two of our own additions (not upstream XenonRecomp — see their READMEs/
+source comments for details):
+- `tools/xex_info` — prints a XEX's base address, entry point, and section
+  layout (structural metadata only, no code/asset content), reusing
+  XenonRecomp's own loader.
+- `tools/extract-xiso` — unpacks Xbox `.iso`/XISO disc images if your dump is
+  a raw disc image rather than an already-extracted folder ([XboxDev/extract-xiso](https://github.com/XboxDev/extract-xiso), modified-BSD licensed).
+
+Binaries land in each tool's own `build/` directory under `tools/` — see the
+summary `build_tools.sh` prints at the end.
 
 ## 4. Get your XEX
 
-You need to dump *your own* legally owned Xbox 360 copy of Web of Shadows. The
-disc/package will contain a `default.xex` (the main executable) and possibly a
-title update package containing a `default.xexp` (a patch XEX with bug fixes —
-worth checking if one exists, since it may fix issues in the base retail code).
+You need to dump *your own* legally owned Xbox 360 copy of Web of Shadows.
+**How you dump it from your disc/console is outside this repo's scope** —
+that's general Xbox 360 modding/dumping knowledge, not specific to
+recompilation. The disc/package will contain a `default.xex` (the main
+executable) and possibly a title update package containing a `default.xexp`
+(a patch XEX with bug fixes — worth checking if one exists, since it may fix
+issues in the base retail code).
 
-Place them here (this directory is gitignored, nothing here gets committed):
+Once you have an extracted folder (or a raw `.iso`), run:
+
+```bash
+tools/import_dump.sh /path/to/your/extracted/wos/folder
+# or, for a raw disc image (extracts it first via extract-xiso):
+tools/import_dump.sh /path/to/wos.iso
+```
+
+This finds `default.xex`/`default.xexp` wherever they are in the dump
+(handles both flat XISO-style layouts and nested GOD-style content folders),
+copies them into `private/` (never modifies your original dump), and prints:
+a directory tree of the source (filenames + sizes only), and `xex_info`'s
+output for the copied file (base address, entry point, section layout). None
+of that is copyrighted content — safe to paste back into chat for help
+filling in the config.
+
+If you'd rather do it by hand instead, place the files here directly (this
+directory is gitignored, nothing here gets committed):
 
 ```
 private/
 ├── default.xex
 └── default.xexp        # optional, if you have a title update
 ```
-
-How you dump the XEX from your disc/console is outside this repo's scope —
-that's general Xbox 360 modding/dumping knowledge, not specific to
-recompilation.
 
 ## 5. First analysis pass
 
