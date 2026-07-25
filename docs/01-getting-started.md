@@ -81,7 +81,10 @@ copies them into `private/` (never modifies your original dump), and prints:
 a directory tree of the source (filenames + sizes only), and `xex_info`'s
 output for the copied file (base address, entry point, section layout). None
 of that is copyrighted content — safe to paste back into chat for help
-filling in the config.
+filling in the config. Record it in
+[`docs/05-findings-log.md`](05-findings-log.md) too, not just in chat — that
+file is what survives context resets/new sessions; chat history isn't a
+durable record.
 
 If you'd rather do it by hand instead, place the files here directly (this
 directory is gitignored, nothing here gets committed):

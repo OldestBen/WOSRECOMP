@@ -8,6 +8,11 @@ Format: a **Current State** summary (rewritten in place, always reflects
 "now"), then a reverse-chronological **Log** of dated entries (append-only,
 never edited after the fact — corrections get a new entry).
 
+This file tracks *project/tooling* state (what code changed, why, what's
+built). For WoS-specific technical findings (XEX addresses, region info,
+`xex_info` output), see [`docs/05-findings-log.md`](docs/05-findings-log.md)
+instead — that's the durable place for data pasted from chat.
+
 ---
 
 ## Current State
@@ -31,15 +36,21 @@ never edited after the fact — corrections get a new entry).
   folder (`wos/`) on their own machine — not yet run through
   `import_dump.sh` or shared back into this session.
 - **Blocked on:** user running `tools/import_dump.sh` against their `wos/`
-  folder and sharing the resulting tree + `xex_info` output → address-hunting
-  in the XEX (docs/02-config-guide.md) can't start until then.
+  folder on their own Mac (testing there; Windows workstation not currently
+  available) and sharing the resulting tree + `xex_info` output →
+  address-hunting in the XEX (docs/02-config-guide.md) can't start until
+  then.
+- **Findings log:** `docs/05-findings-log.md` added as the durable place to
+  record dump info/addresses (separate from this file — see note above).
+  Still empty; nothing pasted in yet.
 
 ## Next Steps (in order)
 
-1. User runs `tools/import_dump.sh <path-to-wos-folder>`, shares the printed
-   directory tree + `xex_info` output, and notes region/edition (NTSC-U
-   retail vs. Platinum Hits vs. PAL vs. JP — these can differ in binary
-   layout).
+1. User runs `tools/import_dump.sh <path-to-wos-folder>` on macOS (Homebrew
+   `llvm@18`), pastes the resulting directory tree + `xex_info` output into
+   chat *and* into `docs/05-findings-log.md`, and notes region/edition
+   (NTSC-U retail vs. Platinum Hits vs. PAL vs. JP — these can differ in
+   binary layout).
 2. Run `XenonAnalyse` against it to produce the first switch-table TOML.
 3. Find the 8 register save/restore function addresses (byte-pattern search,
    see `docs/02-config-guide.md`) and fill in `WoS_config.toml`.
@@ -51,6 +62,28 @@ never edited after the fact — corrections get a new entry).
 ---
 
 ## Log
+
+### 2026-07-25 — Findings log added; macOS confirmed as a valid dev platform
+
+- Added `docs/05-findings-log.md`: the durable, committed place to record
+  WoS-specific technical data (dump directory tree, `xex_info` output,
+  region/edition, and — as they're found — the register save/restore
+  addresses, setjmp/longjmp, function boundary overrides, invalid
+  instruction skips, and mid-asm hooks). Distinct from this file (project/
+  tooling changelog) and from `WoS_config.toml` (the machine-readable
+  result, no provenance/reasoning). Chat history isn't durable across
+  context resets, so anything pasted back needs a home in the repo, not
+  just this conversation.
+- Confirmed macOS is a legitimate dev platform for the toolchain/analysis
+  phase: XenonRecomp/XenonAnalyse/xex_info are portable CMake+Clang with no
+  Windows-specific dependencies (uses `simde` specifically for cross-arch
+  VMX support). Checked the vendored `dxc-bin` submodule directly and
+  confirmed it ships real macOS binaries (x64 and arm64 — `libdxcompiler.dylib`,
+  `dxc-macos`, plus a `build-macos.sh`), so `XenosRecomp` should build on
+  macOS too, though only Linux has actually been build-verified so far.
+  Caveat flagged: needs real Homebrew LLVM/Clang 18, not Xcode's bundled
+  `clang` (different versioning/behavior). User is testing on macOS now;
+  their Windows workstation isn't available at the moment.
 
 ### 2026-07-25 — Dump-ingestion tooling: xex_info, extract-xiso, import_dump.sh
 
