@@ -38,6 +38,34 @@ Summaries also record exit code, duration, host, and the last 30 lines
    something, say so — we can pull specific sections out of the raw log
    deliberately rather than dumping the whole thing.
 
-Keep summaries even for successful runs: a known-good baseline (how long a
-clean build takes, how many warnings are normal) is what makes a later
-regression obvious.
+## Successful runs count too
+
+`run_logged.sh` summarises **every** run, pass or fail — it doesn't only
+trigger on errors. That's deliberate. Successful runs are what give you:
+
+- **Baselines.** How long a clean build takes, how many warnings are
+  normal. Without a recorded "good" run, you can't tell later whether
+  something regressed or was always like that.
+- **Provenance.** A successful `XenonAnalyse` summary records exactly which
+  binary, which command, on what host, at what time — that's the audit
+  trail behind whatever addresses end up in
+  [`WoS_config.toml`](../WoSRecompLib/config/WoS_config.toml).
+- **Reproducibility.** Six months on, "how did we invoke this?" is
+  answerable.
+- **Drift.** Slowly climbing warning counts are an early signal.
+
+## Which summaries to commit
+
+Generating a summary is automatic and free. **Committing** it is a
+judgement call — otherwise the repo fills with noise from routine rebuilds.
+
+Commit a summary when the run **means something**:
+
+- a first success at anything (new baseline)
+- a failure you're actively diagnosing
+- a state change — config edited, new addresses, different input
+- anything you're about to ask about or reference later
+
+Skip committing the dozen near-identical rebuilds in between. If in doubt,
+commit it — they're a few KB each, and a missing baseline costs more than
+a redundant file.
