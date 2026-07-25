@@ -54,6 +54,19 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - **Findings log:** `docs/05-findings-log.md` added as the durable place to
   record dump info/addresses (separate from this file — see note above).
   Still empty; nothing pasted in yet.
+- **User's machines:**
+  - *Primary (Windows workstation)* — Ryzen 9 9950X3D (16C/32T), RTX 5090,
+    **32 GB RAM**. Intended target for the heavy work. Disk capacity not
+    yet stated.
+  - *Currently available (Mac)* — no Homebrew, using `tools/docker/`
+    instead. Fine for ingest/analyse; not the machine for bulk compiles.
+  - **Forward-looking concern:** 32 GB is the likely constraint, not the
+    CPU. Compiling the generated PPC C++ is many parallel Clang jobs on
+    large TUs; a naive `-j32` on 32 GB can thrash or OOM. When a build for
+    `WoSRecompLib/ppc/` exists, cap parallelism (`-j12`–`-j16`) and tune
+    upward from measurements rather than defaulting to `nproc`. Not
+    actionable yet — `tools/build_tools.sh` only builds the toolchain
+    itself, which is small.
 
 ## Next Steps (in order)
 
