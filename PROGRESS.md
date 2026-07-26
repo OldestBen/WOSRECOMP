@@ -101,6 +101,37 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Log
 
+### 2026-07-26 (2) — Stale-file diagnosis confirmed by arithmetic; patching made self-healing
+
+- **The fix from earlier today never ran.** `build_tools.sh` aborted with
+  `patch does not apply and is not already applied`, so XenonRecomp was
+  never rebuilt and every later step used the old binary. The link failed
+  identically, byte for byte.
+- **Why the patch wouldn't apply:** `apply_patches` decided per patch file —
+  reverses cleanly means applied, applies cleanly means apply, neither is a
+  hard error. Amending an already-applied patch file defeats that: the old
+  hunks block a forward apply and the new hunks block a reverse apply. Every
+  future patch amendment would have hit this.
+- `apply_patches` now targets the exact state (`HEAD` + `patches/`) instead
+  of reasoning per file. If the tree doesn't match, it resets just the files
+  the patches touch and applies from clean, saving the discarded diff to
+  `logs/<ts>-<name>-discarded.diff` first. Reproduced the exact failure
+  state locally, confirmed both old checks fail on it, and confirmed the new
+  path recovers to a byte-exact match.
+- **The stale-file diagnosis is now confirmed numerically.** XenonRecomp's
+  first progress line prints `1/functions.size()*100` = `0.0019879923`, so
+  `functions.size() = 50302`. At 256 functions per chunk that is
+  `ceil(50302/256) = 197` files, indices 0..196. There were **199** on disk.
+  `ppc_recomp.197.cpp` and `.198.cpp` are leftovers — and `.197` is exactly
+  the file the linker named.
+- **The contiguity check added earlier was worthless and has been removed.**
+  Leftovers are contiguous by construction: both runs number from zero, so
+  strays are always the tail of an unbroken sequence. It passed happily with
+  two stale files present. Replaced with a real check — the patched
+  recompiler now prints `Wrote N chunk file(s).` and `recompile.sh` compares
+  that against the file count, warning explicitly if the line is absent
+  (which means the tool predates the patch).
+
 ### 2026-07-26 — First host link; duplicate symbols traced to stale generated files
 
 - Ran the full pipeline for the first time: 214 import stubs emitted,

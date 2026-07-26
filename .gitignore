@@ -26,6 +26,9 @@ WoSRecompLib/shaders/generated/
 # so summaries pass through without needing a negation (a "dir/" pattern
 # can't be un-excluded by a later "!dir/file" rule — see private/* above).
 logs/*.log
+# Submodule diffs build_tools.sh sets aside before resetting a working tree
+# that doesn't match patches/. Recovery material, not source.
+logs/*-discarded.diff
 
 # Build artifacts
 build/

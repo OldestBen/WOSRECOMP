@@ -21,18 +21,41 @@ patches/
 ## How they're applied
 
 `tools/build_tools.sh` applies every patch under `patches/<Submodule>/` at
-the start of each build. It's idempotent:
+the start of each build. The target state is exact: the submodule working
+tree must equal **`HEAD` + the patches, nothing more and nothing less**.
+Because patch files are generated with `git diff HEAD`, that state is
+directly verifiable — the tree's own `git diff HEAD` reproduces them byte
+for byte.
 
-| State | Detected by | Action |
-|---|---|---|
-| Already applied | `git apply --reverse --check` succeeds | skip |
-| Not yet applied | `git apply --check` succeeds | apply |
-| Neither | both checks fail | **hard error, build stops** |
+| State | Action |
+|---|---|
+| Tree matches `patches/` exactly | skip |
+| Tree is clean | apply all patches |
+| Tree is modified but doesn't match | save the diff to `logs/`, reset the affected files to `HEAD`, apply |
+| A patch fails on a *clean* tree | **hard error, build stops** |
 
-The third case means the submodule commit has moved and the patch no longer
+The last case means the submodule commit has moved and the patch no longer
 matches. That's deliberately fatal rather than a warning — quietly building
 without our instruction implementations would emit subtly wrong game code
 that fails much later and much less obviously.
+
+### Why it isn't decided per patch file
+
+It used to be: reverses cleanly meant applied, applies cleanly meant apply,
+neither was fatal. That breaks the moment a patch file is **amended** while
+an older version of it is applied — the already-applied hunks block a
+forward apply, the new hunks block a reverse apply, and every build dies
+with `does not apply and is not already applied` until someone resets the
+submodule by hand. This happened for real when the stale-output fix was
+folded into `0001`, and it would have recurred on every future amendment.
+
+The reset path saves what it discards to
+`logs/<timestamp>-<Submodule>-discarded.diff` (gitignored) before touching
+anything. Usually that's just a superseded copy of our own patch, but the
+other way a tree reaches this state is a genuine hand edit inside the
+submodule — which is real work and must not vanish silently. Only the files
+the patches actually touch are reset, so nested submodule pointers under
+`thirdparty/` are left alone.
 
 ## Drift detection
 

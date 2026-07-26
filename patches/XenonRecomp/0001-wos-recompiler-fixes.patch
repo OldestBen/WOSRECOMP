@@ -1,5 +1,5 @@
 diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
-index fa91527..45c4acb 100644
+index fa91527..86903b6 100644
 --- a/XenonRecomp/recompiler.cpp
 +++ b/XenonRecomp/recompiler.cpp
 @@ -688,10 +688,22 @@ bool Recompiler::Recompile(
@@ -181,7 +181,7 @@ index fa91527..45c4acb 100644
      case PPC_INST_VSUBFP:
      case PPC_INST_VSUBFP128:
          printSetFlushMode(true);
-@@ -2617,6 +2706,37 @@ void Recompiler::Recompile(const std::filesystem::path& headerFilePath)
+@@ -2617,6 +2706,44 @@ void Recompiler::Recompile(const std::filesystem::path& headerFilePath)
      }
  
      SaveCurrentOutData();
@@ -215,6 +215,13 @@ index fa91527..45c4acb 100644
 +
 +            fmt::println("Removed stale output file from a previous run: ppc_recomp.{}.cpp", i);
 +        }
++
++        // Printed unconditionally so a driver script can assert that the
++        // number of files on disk matches what this run actually wrote.
++        // Leftovers always form a *contiguous* tail (both runs number from
++        // zero), so counting files or checking for gaps cannot detect them —
++        // only comparing against this number can.
++        fmt::println("Wrote {} chunk file(s).", cppFileIndex);
 +    }
  }
  

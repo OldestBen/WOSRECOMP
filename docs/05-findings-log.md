@@ -362,6 +362,37 @@ repeated addresses. Worth recording separately:
 > at `X+4`. Overlapping functions are consequently normal in XenonRecomp
 > output and are not, by themselves, a defect.
 
+### Confirmation (second attempt, same day)
+
+The first fix attempt never ran — `build_tools.sh` aborted before rebuilding
+XenonRecomp (see the patching note below), so the link failed identically.
+That run did, however, settle the diagnosis arithmetically:
+
+XenonRecomp's first progress line prints
+`static_cast<float>(i + 1) / functions.size() * 100.0f`, and reported
+`0.0019879923` at `i = 0`:
+
+| | |
+|---|---|
+| `functions.size()` | `100 / 0.0019879923` = **50,302** |
+| Functions per chunk | 256 (`if ((i % 256) == 0) SaveCurrentOutData()`) |
+| Chunks this run | `ceil(50302 / 256)` = **197** (indices 0..196) |
+| Files on disk | **199** |
+| Therefore stale | `ppc_recomp.197.cpp`, `ppc_recomp.198.cpp` |
+
+`.197` is precisely the file the linker named. The earlier run must have had
+50,689–50,944 functions, a drop of ~400–600 — consistent with the 106
+boundary overrides absorbing smaller inferred functions.
+
+### Detection: why counting files cannot work
+
+An initial guard checked that chunk indices were contiguous from 0. That is
+useless here and passed with two stale files present: **both runs number
+from zero, so leftovers are always the tail of an unbroken sequence.** There
+is no gap to find. The only reliable signal is the count the recompiler
+itself wrote, so it now prints `Wrote N chunk file(s).` and `recompile.sh`
+compares that against the files present.
+
 ### Fix
 
 `patches/XenonRecomp/0001-wos-recompiler-fixes.patch` now also deletes

@@ -116,48 +116,26 @@ fi
 # lost on a fresh clone. Patches under patches/<Submodule>/*.patch are the
 # version-controlled source of truth; this applies them on every build.
 #
-# Idempotent: a patch that is already applied reverses cleanly, which is how
-# we detect it and skip. A patch that neither applies nor reverses means the
-# submodule has moved under us — that is a hard error, not something to
-# paper over, because silently building without our instruction
-# implementations would produce subtly wrong game code.
+# The target state is exact: the submodule working tree must equal
+# HEAD + patches/<Submodule>/*.patch, nothing more and nothing less. Patch
+# files are generated with `git diff HEAD`, so that state is verifiable —
+# the tree's own `git diff HEAD` reproduces them byte for byte.
+#
+# This used to decide per patch file: reverses cleanly => already applied,
+# applies cleanly => apply, neither => hard error. That breaks the moment a
+# patch file is *amended* while an older version of it is applied. Then the
+# already-applied hunks block a forward apply and the new hunks block a
+# reverse apply, so every build fails with "does not apply and is not
+# already applied" until someone resets the submodule by hand — which is
+# exactly what happened after the stale-output fix was folded into 0001.
+#
+# So: compare against the target state, and if it doesn't match, reset the
+# files our patches touch back to HEAD and apply cleanly from there. The
+# discarded diff is written to logs/ first, because the other way a tree
+# ends up in this state is a genuine hand edit inside the submodule, and
+# those are real work that must not vanish silently.
 # --------------------------------------------------------------------------
 apply_patches() {
-    local name="$1"
-    local repo="$SCRIPT_DIR/$name"
-    local dir="$REPO_ROOT/patches/$name"
-
-    [ -d "$dir" ] || return 0
-
-    local patch
-    for patch in "$dir"/*.patch; do
-        [ -e "$patch" ] || continue
-        local label="${patch##*/}"
-
-        if git -C "$repo" apply --reverse --check "$patch" >/dev/null 2>&1; then
-            echo "==> [$name] already patched: $label"
-        elif git -C "$repo" apply --check "$patch" >/dev/null 2>&1; then
-            git -C "$repo" apply "$patch"
-            echo "==> [$name] applied: $label"
-        else
-            echo "error: patch does not apply and is not already applied:" >&2
-            echo "       $patch" >&2
-            echo "       The submodule has probably moved. Refresh the patch against" >&2
-            echo "       the current submodule commit before building." >&2
-            exit 1
-        fi
-    done
-}
-
-# Detect edits made directly inside a submodule on top of our patches.
-#
-# apply_patches only proves our patches are applied; it cannot tell whether
-# someone also hand-edited the submodule afterwards. Such an edit is invisible
-# to git in this repo and is lost on a fresh clone — exactly the failure the
-# patches/ mechanism exists to prevent. Our patch files are generated with
-# `git diff HEAD`, so if the working tree is precisely HEAD+patches then the
-# submodule's current `git diff HEAD` reproduces them byte for byte.
-check_patch_drift() {
     local name="$1"
     local repo="$SCRIPT_DIR/$name"
     local dir="$REPO_ROOT/patches/$name"
@@ -166,20 +144,76 @@ check_patch_drift() {
     compgen -G "$dir"/*.patch >/dev/null || return 0
 
     # Compare with CR stripped. `git diff` emits LF, but a .patch checked out
-    # on Windows may be CRLF, which would otherwise read as drift that isn't
-    # there. .gitattributes marks *.patch as -text to prevent that at source;
-    # this handles trees checked out before that existed.
+    # on Windows may be CRLF, which would otherwise read as a difference that
+    # isn't there. .gitattributes marks *.patch as -text to prevent that at
+    # source; this handles trees checked out before that existed.
+    local expected actual
+    expected="$(cat "$dir"/*.patch | tr -d '\r')"
+    actual="$(git -C "$repo" diff HEAD 2>/dev/null | tr -d '\r' || true)"
+
+    if [ "$expected" = "$actual" ]; then
+        echo "==> [$name] already patched (tree matches patches/$name exactly)"
+        return 0
+    fi
+
+    if [ -n "$actual" ]; then
+        mkdir -p "$REPO_ROOT/logs"
+        local backup="$REPO_ROOT/logs/$(date +%Y%m%d-%H%M%S)-$name-discarded.diff"
+        printf '%s\n' "$actual" > "$backup"
+
+        echo "==> [$name] working tree does not match patches/$name — resetting"
+        echo "    Saved what was there to: ${backup#$REPO_ROOT/}"
+        echo "    (usually just an older version of our own patch; if you had"
+        echo "     hand edits in the submodule, they are in that file)"
+
+        # Reset only the files the patches touch. `git checkout -- .` would
+        # also reset nested submodule pointers under thirdparty/, which is
+        # not ours to do.
+        local files
+        files="$(cat "$dir"/*.patch | git -C "$repo" apply --numstat - 2>/dev/null | cut -f3)"
+        if [ -z "$files" ]; then
+            echo "error: could not determine which files patches/$name touches." >&2
+            exit 1
+        fi
+        # shellcheck disable=SC2086
+        git -C "$repo" checkout HEAD -- $files
+    fi
+
+    local patch
+    for patch in "$dir"/*.patch; do
+        [ -e "$patch" ] || continue
+        local label="${patch##*/}"
+
+        if ! git -C "$repo" apply "$patch"; then
+            echo "error: [$name] failed to apply $label to a clean tree." >&2
+            echo "       The submodule commit has probably moved. Refresh the" >&2
+            echo "       patch against the current submodule commit:" >&2
+            echo "         git -C tools/$name diff HEAD > patches/$name/$label" >&2
+            exit 1
+        fi
+        echo "==> [$name] applied: $label"
+    done
+}
+
+# Post-condition on apply_patches: the tree must now be exactly HEAD+patches.
+# This should never fire — if it does, apply_patches itself is wrong.
+check_patch_drift() {
+    local name="$1"
+    local repo="$SCRIPT_DIR/$name"
+    local dir="$REPO_ROOT/patches/$name"
+
+    [ -d "$dir" ] || return 0
+    compgen -G "$dir"/*.patch >/dev/null || return 0
+
     local expected actual
     expected="$(cat "$dir"/*.patch | tr -d '\r')"
     actual="$(git -C "$repo" diff HEAD 2>/dev/null | tr -d '\r' || true)"
 
     if [ "$expected" != "$actual" ]; then
         echo >&2
-        echo "warning: [$name] working tree differs from patches/$name/." >&2
-        echo "         Something was edited inside the submodule beyond our patches." >&2
-        echo "         Those edits are NOT tracked by this repo and will be lost on a" >&2
-        echo "         fresh clone. Fold them into the patch:" >&2
-        echo "           git -C tools/$name diff HEAD > patches/$name/0001-*.patch" >&2
+        echo "warning: [$name] tree still differs from patches/$name after applying." >&2
+        echo "         apply_patches should have made these identical — this is a bug" >&2
+        echo "         in the build script, not something you did." >&2
         echo >&2
     fi
 }

@@ -41,30 +41,46 @@ echo "==> Running XenonAnalyse (jump table detection)"
 "$XENON_ANALYSE" "$XEX_PATH" "$SWITCH_TABLES"
 
 echo "==> Running XenonRecomp (PPC -> C++)"
-"$XENON_RECOMP" "$CONFIG_TOML" "$PPC_CONTEXT"
+RECOMP_OUT="$(mktemp)"
+trap 'rm -f "$RECOMP_OUT"' EXIT
+"$XENON_RECOMP" "$CONFIG_TOML" "$PPC_CONTEXT" 2>&1 | tee "$RECOMP_OUT"
 
-# XenonRecomp writes ppc_recomp.0.cpp .. ppc_recomp.N-1.cpp and (with our
-# patch) deletes any higher-numbered files a previous, longer run left
-# behind. Without that prune, the strays compile fine and only surface as
-# "duplicate symbol" when an executable is finally linked — so check the
-# indices really are contiguous from 0, which is what the prune guarantees.
+# Verify WoSRecompLib/ppc/ holds exactly what this run wrote.
+#
+# XenonRecomp names its output ppc_recomp.0.cpp .. ppc_recomp.N-1.cpp and,
+# before our patch, never deleted anything — so a run producing fewer chunks
+# than the one before it left the previous run's tail behind, holding the
+# same functions under stale boundaries. Those files compile fine and only
+# fail at link time as "duplicate symbol".
+#
+# Note leftovers are *contiguous*: both runs number from zero, so the strays
+# are always the top of an unbroken 0..M sequence. Counting files or looking
+# for gaps therefore cannot detect them — an earlier version of this check
+# did exactly that and passed while two stale files sat on disk. The only
+# reliable comparison is against the count the recompiler itself reports.
 PPC_DIR="$REPO_ROOT/WoSRecompLib/ppc"
-if compgen -G "$PPC_DIR/ppc_recomp.*.cpp" >/dev/null; then
-    count=$(ls "$PPC_DIR"/ppc_recomp.*.cpp | wc -l)
-    missing=""
-    for ((i = 0; i < count; i++)); do
-        [ -f "$PPC_DIR/ppc_recomp.$i.cpp" ] || missing="$missing $i"
-    done
+WROTE="$(sed -n 's/^Wrote \([0-9]\+\) chunk file(s)\.$/\1/p' "$RECOMP_OUT" | tail -1)"
+ON_DISK=0
+compgen -G "$PPC_DIR/ppc_recomp.*.cpp" >/dev/null && \
+    ON_DISK=$(ls "$PPC_DIR"/ppc_recomp.*.cpp | wc -l)
 
-    echo "==> $count generated chunk(s) in WoSRecompLib/ppc/"
-    if [ -n "$missing" ]; then
-        echo >&2
-        echo "error: chunk indices are not contiguous — missing:$missing" >&2
-        echo "       That means WoSRecompLib/ppc/ holds files from more than one" >&2
-        echo "       recompiler run, and linking will fail with duplicate symbols." >&2
-        echo "       Delete WoSRecompLib/ppc/ppc_recomp.*.cpp and re-run this script." >&2
-        exit 1
-    fi
+if [ -z "$WROTE" ]; then
+    echo >&2
+    echo "warning: XenonRecomp did not report a chunk count, so stale output" >&2
+    echo "         files cannot be detected. Your XenonRecomp build predates" >&2
+    echo "         patches/XenonRecomp/0001-wos-recompiler-fixes.patch — re-run" >&2
+    echo "         ./tools/build_tools.sh, then this script again." >&2
+    echo >&2
+elif [ "$WROTE" -ne "$ON_DISK" ]; then
+    echo >&2
+    echo "error: this run wrote $WROTE chunk file(s) but $ON_DISK are on disk." >&2
+    echo "       WoSRecompLib/ppc/ holds output from more than one recompiler" >&2
+    echo "       run; linking would fail with duplicate symbols. Clear it and" >&2
+    echo "       re-run this script:" >&2
+    echo "         rm -f WoSRecompLib/ppc/ppc_recomp.*.cpp" >&2
+    exit 1
+else
+    echo "==> $ON_DISK chunk file(s) in WoSRecompLib/ppc/ — matches this run"
 fi
 
 echo
