@@ -16,4 +16,6 @@ add_subdirectory("${XENONRECOMP_ROOT}/XenonUtils" "${CMAKE_CURRENT_BINARY_DIR}/X
 
 add_executable(xex_info main.cpp)
 target_compile_definitions(xex_info PRIVATE NOMINMAX)
-target_link_libraries(xex_info PRIVATE XenonUtils)
+# tomlplusplus is needed by --fix-switches to read XenonAnalyse's switch
+# table output; it's already built by the thirdparty subdirectory above.
+target_link_libraries(xex_info PRIVATE XenonUtils tomlplusplus::tomlplusplus)

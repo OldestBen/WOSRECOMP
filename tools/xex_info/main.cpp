@@ -9,9 +9,14 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <map>
+#include <algorithm>
 #include <file.h>
 #include <image.h>
 #include <xex.h>
+#include <xbox.h>
+#include <byteswap.h>
+#include <toml++/toml.hpp>
 
 // ---------------------------------------------------------------------------
 // --helpers: locate the compiler-generated register save/restore functions
@@ -150,22 +155,215 @@ static int findHelpers(const Image& image)
     return EXIT_SUCCESS;
 }
 
+// ---------------------------------------------------------------------------
+// --fix-switches: derive `functions = [...]` overrides for switch tables whose
+// cases jump outside their detected function.
+//
+// XenonRecomp registers one function per .pdata unwind record
+// (recompiler.cpp, using FunctionLength * 4). A single logical function can be
+// split across several consecutive .pdata records, so a switch that jumps
+// between the pieces looks like it's jumping out of bounds, and the
+// recompiler reports:
+//     ERROR: Switch case at <site> is trying to jump outside function: <target>
+//
+// The fix is a `functions` entry that spans the whole thing. This computes
+// them: for each switch site, find the .pdata record containing it, and if any
+// case target lands beyond that record's end, widen the function to cover the
+// furthest target — absorbing the intervening records, which is precisely what
+// "these are really one function" means.
+// ---------------------------------------------------------------------------
+
+struct PdataFunc { uint32_t begin; uint32_t end; };
+
+static std::vector<PdataFunc> readPdata(const Image& image)
+{
+    std::vector<PdataFunc> out;
+    const Section* pdata = image.Find(".pdata");
+    if (pdata == nullptr || pdata->data == nullptr)
+        return out;
+
+    const size_t count = pdata->size / sizeof(IMAGE_CE_RUNTIME_FUNCTION);
+    const auto* pf = reinterpret_cast<const IMAGE_CE_RUNTIME_FUNCTION*>(pdata->data);
+    out.reserve(count);
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        IMAGE_CE_RUNTIME_FUNCTION fn = pf[i];
+        fn.BeginAddress = ByteSwap(fn.BeginAddress);
+        fn.Data = ByteSwap(fn.Data);
+        if (fn.BeginAddress == 0 || fn.FunctionLength == 0)
+            continue;
+        out.push_back({ fn.BeginAddress, fn.BeginAddress + fn.FunctionLength * 4u });
+    }
+
+    std::sort(out.begin(), out.end(),
+        [](const PdataFunc& a, const PdataFunc& b) { return a.begin < b.begin; });
+    return out;
+}
+
+static int fixSwitches(const Image& image, const char* switchTomlPath)
+{
+    const std::vector<PdataFunc> pdata = readPdata(image);
+    if (pdata.empty())
+    {
+        fprintf(stderr, "No usable .pdata records found — cannot derive boundaries.\n");
+        return EXIT_FAILURE;
+    }
+    printf("Loaded %zu .pdata function records.\n", pdata.size());
+
+    toml::table tbl;
+    try
+    {
+        tbl = toml::parse_file(switchTomlPath);
+    }
+    catch (const std::exception& e)
+    {
+        fprintf(stderr, "Failed to parse \"%s\": %s\n", switchTomlPath, e.what());
+        return EXIT_FAILURE;
+    }
+
+    const auto* switches = tbl["switch"].as_array();
+    if (switches == nullptr)
+    {
+        fprintf(stderr, "\"%s\" contains no [[switch]] entries.\n", switchTomlPath);
+        return EXIT_FAILURE;
+    }
+    printf("Loaded %zu switch tables.\n\n", switches->size());
+
+    // Locate the .pdata record containing an address.
+    auto containing = [&](uint32_t addr) -> const PdataFunc* {
+        auto it = std::upper_bound(pdata.begin(), pdata.end(), addr,
+            [](uint32_t v, const PdataFunc& f) { return v < f.begin; });
+        if (it == pdata.begin())
+            return nullptr;
+        --it;
+        return (addr < it->end) ? &*it : nullptr;
+    };
+
+    // fnStart -> required end address
+    std::map<uint32_t, uint32_t> widened;
+    size_t offending = 0, unlocatable = 0;
+
+    for (const auto& node : *switches)
+    {
+        const auto* s = node.as_table();
+        if (s == nullptr)
+            continue;
+
+        const auto base = (*s)["base"].value<int64_t>();
+        if (!base)
+            continue;
+        const auto site = static_cast<uint32_t>(*base);
+
+        // Collect every target this switch can reach.
+        std::vector<uint32_t> targets;
+        if (auto def = (*s)["default"].value<int64_t>())
+            targets.push_back(static_cast<uint32_t>(*def));
+        if (const auto* labels = (*s)["labels"].as_array())
+        {
+            for (const auto& l : *labels)
+            {
+                if (auto v = l.value<int64_t>())
+                    targets.push_back(static_cast<uint32_t>(*v));
+            }
+        }
+        if (targets.empty())
+            continue;
+
+        const PdataFunc* fn = containing(site);
+        if (fn == nullptr)
+        {
+            ++unlocatable;
+            continue;
+        }
+
+        uint32_t needEnd = fn->end;
+        bool outside = false;
+        for (uint32_t t : targets)
+        {
+            // A target below the function start is a different problem
+            // (tail-call / shared tail); only widening forward is safe here.
+            if (t >= fn->end)
+            {
+                outside = true;
+                needEnd = std::max(needEnd, t + 4u);
+            }
+        }
+
+        if (!outside)
+            continue;
+
+        ++offending;
+        auto [it, inserted] = widened.emplace(fn->begin, needEnd);
+        if (!inserted)
+            it->second = std::max(it->second, needEnd);
+    }
+
+    printf("Switch sites whose cases escape their .pdata function: %zu\n", offending);
+    if (unlocatable > 0)
+        printf("Switch sites with no containing .pdata record:        %zu\n", unlocatable);
+    printf("Distinct functions needing widening:                   %zu\n\n", widened.size());
+
+    if (widened.empty())
+    {
+        printf("Nothing to do.\n");
+        return EXIT_SUCCESS;
+    }
+
+    printf("--- replace the `functions = [...]` block in WoS_config.toml ---\n\n");
+    printf("functions = [\n");
+    for (const auto& [start, end] : widened)
+    {
+        const PdataFunc* orig = containing(start);
+        const uint32_t origEnd = orig ? orig->end : start;
+        size_t absorbed = 0;
+        for (const auto& f : pdata)
+        {
+            if (f.begin > start && f.begin < end)
+                ++absorbed;
+        }
+        printf("    { address = 0x%08X, size = 0x%X },  # was 0x%X, +%zu record(s)\n",
+            start, end - start, origEnd - start, absorbed);
+    }
+    printf("]\n\n");
+    printf("These widen each function to reach its furthest switch target,\n");
+    printf("absorbing the .pdata records in between — i.e. treating the split\n");
+    printf("records as the single function they actually are. Re-run XenonRecomp\n");
+    printf("afterwards; config entries take priority over .pdata.\n");
+
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        printf("Usage: xex_info [input XEX/XEXP file path] [--helpers]\n");
-        printf("  (no flag)  print base address, entry point and section layout\n");
-        printf("  --helpers  locate the register save/restore helper functions\n");
-        printf("             needed by WoS_config.toml (see docs/02-config-guide.md)\n");
+        printf("Usage: xex_info <XEX/XEXP path> [--helpers] [--fix-switches <switch_tables.toml>]\n");
+        printf("  (no flag)        print base address, entry point and section layout\n");
+        printf("  --helpers        locate the register save/restore helper functions\n");
+        printf("                   needed by WoS_config.toml (see docs/02-config-guide.md)\n");
+        printf("  --fix-switches   derive `functions = [...]` overrides for switch cases\n");
+        printf("                   that jump outside their detected function\n");
         return EXIT_SUCCESS;
     }
 
     bool wantHelpers = false;
+    const char* switchToml = nullptr;
     for (int i = 2; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--helpers") == 0)
+        {
             wantHelpers = true;
+        }
+        else if (std::strcmp(argv[i], "--fix-switches") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "--fix-switches requires a path to the switch table TOML.\n");
+                return EXIT_FAILURE;
+            }
+            switchToml = argv[++i];
+        }
     }
 
     const auto file = LoadFile(argv[1]);
@@ -232,6 +430,9 @@ int main(int argc, char** argv)
         fprintf(stderr, "Failed to parse \"%s\": %s\n", argv[1], e.what());
         return EXIT_FAILURE;
     }
+
+    if (switchToml != nullptr)
+        return fixSwitches(image, switchToml);
 
     if (wantHelpers)
         return findHelpers(image);
