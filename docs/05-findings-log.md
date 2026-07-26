@@ -452,6 +452,66 @@ logging stub per import, and the host prints them in call order — turning
 214 alphabetical names into the game's actual boot sequence, which is what
 tells you *which* to implement next.
 
+## XEX section sources can point past the decrypted image (2026-07-26)
+
+First execution of the harness faulted while mapping sections:
+
+```
+=== CRASH: access violation (0xC0000005) ===
+tried to READ address 000001DFC6833000
+that is OUTSIDE the guest reservation (000001DFC6840000 .. 000001E04AA985C8)
+```
+
+A read, below the guest base, with the next phase marker unprinted — so the
+fault was the memcpy **source** inside the section loop, on a section past
+`.XBLD`.
+
+### Mechanism
+
+`XenonUtils/xex.cpp:293` maps every section as:
+
+```cpp
+image.Map(name, section.VirtualAddress, section.Misc.VirtualSize, flags,
+          image.data.get() + section.VirtualAddress);
+```
+
+No bounds check. And the buffer's real size need not equal `image.size`:
+
+| Compression | Buffer allocated with | `image.size` set to |
+|---|---|---|
+| `NONE` | `security->imageSize` | `security->imageSize` |
+| **`BASIC`** | **sum of block `dataSize + zeroSize`** (`xex.cpp:177-183`) | `security->imageSize` (`xex.cpp:261`) |
+| `NORMAL` | `security->imageSize` | `security->imageSize` |
+
+For BASIC compression the two are computed independently and are only equal
+by convention. Where the header value is larger, `image.size` overstates the
+allocation, and sections near the top of the image resolve to addresses past
+its end.
+
+### Consequence for the recompiler, not just the harness
+
+XenonRecomp reads section data through the same pointers, so an
+out-of-range section would feed it unmapped memory too. It has not crashed,
+which suggests the sections it actually walks (`.text`, `.pdata`) are well
+inside the buffer — but that is luck, not a guarantee.
+
+### What the harness does now
+
+Prints the decrypted buffer's true bounds and the section count; prints each
+section's name, guest base, size and source pointer *before* touching it; then
+zero-fills sources wholly outside the buffer, clamps those running past the
+end, and skips sections extending beyond the guest reservation — reporting
+each case rather than trusting the loader.
+
+### Section names are also unterminated
+
+`IMAGE_SECTION_HEADER::Name` is an 8-byte field with no terminator when all
+8 bytes are used, and XenonUtils builds a `std::string` from it via the
+`const char*` constructor. Hence `BINKDATA` reading as `BINKDATAh=` and
+`.XBMOVIE` dragging in a newline. Harmless for `.pdata`/`.text` lookups
+(both under 8 chars, so NUL-padded), but any exactly-8-character section
+name is wrong. The harness sanitises at print time via `CleanName()`.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*

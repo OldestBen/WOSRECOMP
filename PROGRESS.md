@@ -28,11 +28,12 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **The harness links and runs.** It loads the XEX, maps all 12
-  sections, and then crashes. Where exactly is not yet known — the first run
-  had buffered stdout, so the visible stopping point was untrustworthy.
-  Instrumented since (unbuffered output + a crash reporter that translates
-  the faulting host address into a guest address); next run pins it down.
+- **Stage:** **The harness links and runs.** It loads the XEX and maps 12
+  sections, then faults while mapping — the crash reporter placed it
+  **outside the guest reservation**, i.e. host-side, reading past the end of
+  the decrypted image buffer rather than the game touching bad memory.
+  Section mapping now validates every source range instead of trusting it;
+  next run should get past this to the entry point.
 - **Toolchain:** builds clean on Windows (VS 2026, clang-cl 22.1.3, CMake
   4.3.1) and Linux (Clang 18.1.3, CMake 3.28). Five tools:
   `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, plus our `xex_info` and
@@ -102,6 +103,43 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (4) — Crash located: XEX section sources aren't bounds-checked
+
+- The crash reporter fired and answered the question in one run:
+  ```
+  === CRASH: access violation (0xC0000005) ===
+  tried to READ address 000001DFC6833000
+  that is OUTSIDE the guest reservation (000001DFC6840000 .. 000001E04AA985C8)
+    -> host-side bug, not the recompiled game touching bad memory
+  ```
+  A **read**, **below** the guest base, with the "committing indirect-call
+  table" marker never printed — so it faulted inside the section-mapping
+  loop, on a section after `.XBLD`, and the bad pointer was the memcpy
+  *source*, not the destination.
+- **Cause is in XenonUtils' XEX loader, and it's structural.**
+  `Image::Map` is handed `image.data.get() + section.VirtualAddress` with no
+  check that the result is inside the buffer. Those two numbers need not
+  agree: for `XEX_COMPRESSION_BASIC`, `xex.cpp` recomputes `imageSize` as the
+  sum of the compression blocks and allocates *that*, then line 261 sets
+  `image.size = security->imageSize` — the header's value. When the header
+  value is the larger of the two, `image.size` overstates the allocation and
+  any section near the top of the image points past its end.
+- The harness no longer trusts either number. It prints the decrypted
+  buffer's real bounds and the section count, prints each section's name /
+  guest base / size / source pointer **before** touching it, and then
+  validates: a source wholly outside the buffer is zero-filled, one that
+  runs off the end is clamped to what's actually there, and a section
+  extending past the guest reservation is skipped. Each case is reported.
+- Also added `CleanName()`. `IMAGE_SECTION_HEADER::Name` is 8 bytes and is
+  not null-terminated when the name uses all 8, and XenonUtils builds a
+  `std::string` from it with the `const char*` constructor — which is why
+  `BINKDATA` printed as `BINKDATAh=` and `.XBMOVIE` dragged in a newline.
+  Cosmetic, but a garbled name in a diagnostic is a garbled diagnostic.
+- `CleanName` and the clamp arithmetic are unit-tested (8-char bleed,
+  non-printable leader, empty name; wholly-inside, runs-past-end,
+  starts-at-end, starts-before-begin, last-valid-byte). Both the Win32 and
+  POSIX builds type-check.
 
 ### 2026-07-26 (3) — First execution: harness runs, maps the image, then faults
 

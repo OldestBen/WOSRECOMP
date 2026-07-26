@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cinttypes>
+#include <string>
 
 #include <file.h>
 #include <image.h>
@@ -105,6 +106,25 @@ void PageAlign(uint64_t& start, uint64_t& size, uint64_t pageSize = 0x10000)
     const uint64_t end = (start + size + pageSize - 1) & ~(pageSize - 1);
     start &= ~(pageSize - 1);
     size = end - start;
+}
+
+// Section names come from IMAGE_SECTION_HEADER::Name, which is an 8-byte
+// field that is NOT null-terminated when the name uses all 8 bytes. XenonUtils
+// builds a std::string from it with `std::string(const char*)`, so an 8-char
+// name runs on into whatever follows in the header — which is why "BINKDATA"
+// prints as "BINKDATAh=" and ".XBMOVIE" drags in a newline. Cosmetic for us,
+// but a garbled name in a diagnostic is a garbled diagnostic.
+std::string CleanName(const std::string& raw)
+{
+    std::string out;
+    for (size_t i = 0; i < raw.size() && i < 8; ++i)
+    {
+        const unsigned char c = static_cast<unsigned char>(raw[i]);
+        if (c < 0x20 || c > 0x7E)
+            break;
+        out += char(c);
+    }
+    return out.empty() ? "<unnamed>" : out;
 }
 
 #ifdef _WIN32
@@ -223,9 +243,40 @@ int main(int argc, char** argv)
     g_guestSize = kTotalSize;
     printf("guest base: %p\n\n", (void*)base);
 
-    // Map each section at its virtual address.
+    // Every section's source pointer is `image.data.get() + VirtualAddress`,
+    // assigned by XenonUtils with no bounds check against the buffer it just
+    // allocated. Those two numbers do not have to agree: for BASIC-compressed
+    // XEXs the buffer is sized by summing the compression blocks, while
+    // image.size is then overwritten with the header's imageSize. A section
+    // near the top of the image can therefore point past the end of the
+    // decrypted data, and memcpy'ing it reads unmapped memory.
+    //
+    // So: validate every source range before copying, and say so out loud.
+    const uint8_t* const imgBegin = image.data.get();
+    const uint8_t* const imgEnd = imgBegin + image.size;
+
+    printf("decrypted image buffer: %p .. %p (0x%X bytes)\n",
+        (const void*)imgBegin, (const void*)imgEnd, image.size);
+    printf("%zu section(s)\n\n", image.sections.size());
+
+    size_t badSections = 0;
+
     for (const auto& section : image.sections)
     {
+        // Printed before any work, so if this faults the log names the
+        // section that did it rather than the last one that survived.
+        printf("  %-10s guest 0x%08zX  size 0x%-8X src %p  %-4s ",
+            CleanName(section.name).c_str(), section.base, section.size,
+            (const void*)section.data,
+            (section.flags & SectionFlags_Code) ? "CODE" : "");
+
+        if (section.base + section.size > kTotalSize)
+        {
+            printf("SKIPPED: extends past the guest reservation\n");
+            ++badSections;
+            continue;
+        }
+
         uint64_t start = section.base;
         uint64_t size = section.size;
         PageAlign(start, size);
@@ -233,12 +284,41 @@ int main(int argc, char** argv)
         if (!CommitRange(base, start, size))
             return EXIT_FAILURE;
 
-        if (section.data != nullptr)
-            std::memcpy(base + section.base, section.data, section.size);
+        size_t copy = section.size;
+        const char* note = "ok";
 
-        printf("mapped %-12s 0x%08zX  size 0x%-8X %s\n",
-            section.name.c_str(), section.base, section.size,
-            (section.flags & SectionFlags_Code) ? "CODE" : "");
+        if (section.data == nullptr)
+        {
+            copy = 0;
+            note = "zero-filled (no source data)";
+        }
+        else if (section.data < imgBegin || section.data >= imgEnd)
+        {
+            copy = 0;
+            note = "ZERO-FILLED: source lies outside the decrypted image";
+            ++badSections;
+        }
+        else if (section.data + copy > imgEnd)
+        {
+            copy = size_t(imgEnd - section.data);
+            note = "CLAMPED: source runs past the end of the decrypted image";
+            ++badSections;
+        }
+
+        if (copy > 0)
+            std::memcpy(base + section.base, section.data, copy);
+
+        if (copy < section.size)
+            printf("%s (copied 0x%zX of 0x%X)\n", note, copy, section.size);
+        else
+            printf("%s\n", note);
+    }
+
+    if (badSections > 0)
+    {
+        printf("\n%zu section(s) had an out-of-range source. That is an XEX\n", badSections);
+        printf("parsing problem, not a game problem — see the comment above this\n");
+        printf("loop. The image is mapped anyway, with the bad ranges zeroed.\n");
     }
 
     // Commit and populate the indirect-call table.
