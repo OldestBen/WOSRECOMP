@@ -38,10 +38,11 @@ void LogImportCall(const char* name)
     }
 }
 
-void DumpImportLog()
+namespace
 {
-    std::lock_guard<std::mutex> lock(g_mutex);
 
+void DumpLocked()
+{
     printf("\n=== import trace ===\n");
 
     if (g_order.empty())
@@ -61,6 +62,25 @@ void DumpImportLog()
 
     printf("\nThese are the functions to implement first — in this order.\n");
     printf("Everything else is unreachable until these behave properly.\n");
+}
+
+} // namespace
+
+void DumpImportLog()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    DumpLocked();
+}
+
+void DumpImportLogUnsafe()
+{
+    // try_to_lock, not lock: a fault inside LogImportCall leaves this thread
+    // already holding g_mutex, and std::mutex is not recursive, so blocking
+    // here would deadlock the crash handler. The data is only appended to, so
+    // reading it without the lock can at worst show a torn tail — acceptable
+    // when the alternative is printing nothing at all.
+    std::unique_lock<std::mutex> lock(g_mutex, std::try_to_lock);
+    DumpLocked();
 }
 
 } // namespace wos

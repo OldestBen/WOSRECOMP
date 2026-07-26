@@ -28,9 +28,11 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** CPU code recompiles **and compiles**. Host harness links —
-  first attempt failed on duplicate symbols; cause found and fixed (stale
-  generated files, see below). Nothing has executed yet.
+- **Stage:** **The harness links and runs.** It loads the XEX, maps all 12
+  sections, and then crashes. Where exactly is not yet known — the first run
+  had buffered stdout, so the visible stopping point was untrustworthy.
+  Instrumented since (unbuffered output + a crash reporter that translates
+  the faulting host address into a guest address); next run pins it down.
 - **Toolchain:** builds clean on Windows (VS 2026, clang-cl 22.1.3, CMake
   4.3.1) and Linux (Clang 18.1.3, CMake 3.28). Five tools:
   `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, plus our `xex_info` and
@@ -100,6 +102,42 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (3) — First execution: harness runs, maps the image, then faults
+
+- **`WoSRecomp.exe` linked and ran for the first time.** It parsed the XEX,
+  reserved 2.06 GiB of guest space and mapped all 12 sections at their
+  virtual addresses (`.rdata`, `.pdata`, `BINKBSS`, `.text`, `BINK`,
+  `.data`, `.tls`, `BINKDATA`, `.XBMOVIE`, `.idata`, `.XBLD`), then died
+  with a segfault. No import stubs were reached.
+- Confirmed the two stale chunk files were the whole link problem: deleting
+  `ppc_recomp.197.cpp` and `.198.cpp` left 198 sources (197 chunks +
+  `ppc_func_mapping.cpp`), exactly as predicted, and it linked first try.
+- `build_tools.sh`'s new self-healing path worked on the real tree:
+  `working tree does not match patches/XenonRecomp — resetting`, saved the
+  superseded diff to `logs/`, applied cleanly, rebuilt XenonRecomp.
+- **The stopping point in that run cannot be trusted.** Under MinTTY stdout
+  is a pipe, so a native `.exe` gets *fully* buffered output — the last
+  visible line is wherever the buffer last flushed, not where the fault
+  happened. Whether ~870 bytes of section map should have been visible at
+  all under full buffering is contradictory, which is itself a reason not
+  to reason from it. Fixed at the source: `setvbuf(stdout, nullptr,
+  _IONBF, 0)` in `main()`.
+- Added a Windows unhandled-exception filter that reports the exception
+  kind, the faulting instruction, whether it was a read or a write, and —
+  because the guest space is a flat `base + guest_address` mapping — the
+  **guest** address it corresponds to, classified as image / indirect-call
+  table / unmapped low memory / outside the reservation entirely. Also
+  added phase markers around the table commit and population.
+- `DumpImportLogUnsafe()` added for the crash path: `try_to_lock` rather
+  than `lock`, because a fault inside `LogImportCall` would leave the
+  mutex held by the faulting thread and deadlock the reporter. A hang is
+  worse than a slightly racy dump.
+- **Windows-only code is now actually verifiable here.** Installed
+  `g++-mingw-w64-x86-64` in the sandbox and cross-compiled the harness for
+  `x86_64-w64-mingw32`; both the Win32 and POSIX paths type-check. Doesn't
+  substitute for running it (no Wine), but it stops Windows-only code
+  being pushed sight-unseen — which has bitten this project twice.
 
 ### 2026-07-26 (2) — Stale-file diagnosis confirmed by arithmetic; patching made self-healing
 

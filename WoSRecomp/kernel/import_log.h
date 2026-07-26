@@ -22,6 +22,12 @@ void LogImportCall(const char* name);
 // Print the trace: call order, then totals. Safe to call more than once.
 void DumpImportLog();
 
+// Same, but for use from a crash handler. Takes the lock only if it is free:
+// if the fault happened inside LogImportCall the lock is already held by this
+// same thread, and blocking on it would deadlock — turning a crash report
+// into a hang, which is strictly worse than a slightly racy one.
+void DumpImportLogUnsafe();
+
 } // namespace wos
 
 #define WOS_IMPORT_STUB(name) ::wos::LogImportCall(name)

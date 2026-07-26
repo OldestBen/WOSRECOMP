@@ -42,6 +42,11 @@
 namespace
 {
 
+// Set by main() once the reservation exists, so the crash reporter can
+// translate a faulting host address back into a guest address.
+uint8_t* g_guestBase = nullptr;
+uint64_t g_guestSize = 0;
+
 // Guest memory must cover [0, PPC_IMAGE_BASE + PPC_IMAGE_SIZE), because the
 // generated code addresses it as base + guest_address with no translation.
 // Above that sits the indirect-call table: PPC_LOOKUP_FUNC indexes it as
@@ -102,10 +107,88 @@ void PageAlign(uint64_t& start, uint64_t& size, uint64_t pageSize = 0x10000)
     size = end - start;
 }
 
+#ifdef _WIN32
+
+// Turn "Segmentation fault" into something diagnosable.
+//
+// Without this all we learn is that the process died. What we actually need
+// is: which address faulted, was it a read or a write, and — since the guest
+// address space is just `base + guest_address` — what guest address that
+// corresponds to. A fault at guest 0x82... is the recompiled game touching
+// unmapped memory; a fault outside the reservation entirely is a bug in the
+// harness or in host code.
+LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
+{
+    const auto* rec = info->ExceptionRecord;
+
+    const char* name = "unknown";
+    switch (rec->ExceptionCode)
+    {
+    case EXCEPTION_ACCESS_VIOLATION:      name = "access violation"; break;
+    case EXCEPTION_ILLEGAL_INSTRUCTION:   name = "illegal instruction"; break;
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:    name = "integer divide by zero"; break;
+    case EXCEPTION_STACK_OVERFLOW:        name = "stack overflow"; break;
+    case EXCEPTION_PRIV_INSTRUCTION:      name = "privileged instruction"; break;
+    case EXCEPTION_IN_PAGE_ERROR:         name = "in-page error"; break;
+    default: break;
+    }
+
+    printf("\n=== CRASH: %s (0x%08lX) ===\n", name, rec->ExceptionCode);
+    printf("faulting instruction at %p\n", rec->ExceptionAddress);
+
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2)
+    {
+        const auto op = rec->ExceptionInformation[0];
+        const auto addr = reinterpret_cast<uint8_t*>(rec->ExceptionInformation[1]);
+
+        printf("tried to %s address %p\n",
+            op == 0 ? "READ" : (op == 1 ? "WRITE" : "EXECUTE"), (void*)addr);
+
+        if (g_guestBase != nullptr && addr >= g_guestBase && addr < g_guestBase + g_guestSize)
+        {
+            const uint64_t guest = uint64_t(addr - g_guestBase);
+            printf("that is GUEST address 0x%08" PRIX64 "\n", guest);
+
+            if (guest >= PPC_IMAGE_BASE + PPC_IMAGE_SIZE)
+                printf("  -> inside the indirect-call table (a call through a\n"
+                       "     function pointer we never populated)\n");
+            else if (guest < PPC_IMAGE_BASE)
+                printf("  -> below the image base: uncommitted low memory. Most\n"
+                       "     likely a null/garbage guest pointer being dereferenced.\n");
+            else
+                printf("  -> inside the loaded image\n");
+        }
+        else
+        {
+            printf("that is OUTSIDE the guest reservation (%p .. %p)\n",
+                (void*)g_guestBase, (void*)(g_guestBase + g_guestSize));
+            printf("  -> host-side bug, not the recompiled game touching bad memory\n");
+        }
+    }
+
+    wos::DumpImportLogUnsafe();
+    fflush(stdout);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+#endif // _WIN32
+
 } // namespace
 
 int main(int argc, char** argv)
 {
+    // Unbuffered, so the last line printed is genuinely the last line that
+    // ran. Under MinTTY (Git Bash) stdout is a pipe, not a console, so the
+    // default is *fully* buffered — on a crash the tail of the output is
+    // lost and the visible stopping point is wherever the 4 KiB buffer last
+    // flushed, which is not where the fault happened. Getting that wrong
+    // sends you looking in the wrong function entirely.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(CrashReporter);
+#endif
+
     const char* xexPath = argc > 1 ? argv[1] : "private/default.xex";
 
     printf("=== WoSRecomp harness ===\n");
@@ -136,6 +219,10 @@ int main(int argc, char** argv)
     if (base == nullptr)
         return EXIT_FAILURE;
 
+    g_guestBase = base;
+    g_guestSize = kTotalSize;
+    printf("guest base: %p\n\n", (void*)base);
+
     // Map each section at its virtual address.
     for (const auto& section : image.sections)
     {
@@ -155,8 +242,14 @@ int main(int argc, char** argv)
     }
 
     // Commit and populate the indirect-call table.
+    printf("\ncommitting indirect-call table: guest 0x%" PRIX64 " .. 0x%" PRIX64 " (%.1f MiB)\n",
+        kFuncTableOffset, kFuncTableOffset + kFuncTableSize,
+        double(kFuncTableSize) / (1024.0 * 1024.0));
+
     if (!CommitRange(base, kFuncTableOffset, kFuncTableSize))
         return EXIT_FAILURE;
+
+    printf("populating function table...\n");
 
     size_t mapped = 0, outOfRange = 0;
     for (const PPCFuncMapping* m = PPCFuncMappings; m->host != nullptr; ++m)
@@ -171,12 +264,22 @@ int main(int argc, char** argv)
         ++mapped;
     }
 
-    printf("\nfunction table: %zu mapped", mapped);
+    printf("function table: %zu mapped", mapped);
     if (outOfRange > 0)
         printf(", %zu outside code range (skipped)", outOfRange);
     printf("\n");
 
     printf("entry point: 0x%zX\n", image.entry_point);
+
+    if (image.entry_point < PPC_CODE_BASE ||
+        image.entry_point >= PPC_CODE_BASE + PPC_CODE_SIZE)
+    {
+        fprintf(stderr, "\nEntry point is outside the recompiled code range\n"
+                        "(0x%llX .. 0x%llX) — cannot look it up.\n",
+            (unsigned long long)PPC_CODE_BASE,
+            (unsigned long long)(PPC_CODE_BASE + PPC_CODE_SIZE));
+        return EXIT_FAILURE;
+    }
 
     PPCFunc* entry = *reinterpret_cast<PPCFunc**>(
         base + kFuncTableOffset + (uint64_t(uint32_t(image.entry_point) - PPC_CODE_BASE) * 2));
@@ -207,6 +310,7 @@ int main(int argc, char** argv)
     PPCContext ctx{};
     ctx.r1.u64 = kStackTop;
 
+    printf("entry resolved to host %p\n", (void*)entry);
     printf("\nscratch stack at 0x%X (0x%X bytes)\n", kStackTop, kStackSize);
     printf("calling entry point — expect a fault, nothing is set up yet\n");
     fflush(stdout);
