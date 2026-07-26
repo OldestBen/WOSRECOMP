@@ -421,20 +421,52 @@ static int fixSwitches(const Image& image, const char* switchTomlPath)
         return EXIT_SUCCESS;
     }
 
+    // Merge overlapping extents.
+    //
+    // inferFunctionStart walks back to the first terminator it sees, but an
+    // early `blr` is a *return*, not a function boundary — functions commonly
+    // have several exit points. So two switch sites in the same function can
+    // yield different starts, the later one landing just after an early
+    // return. The signature is unmistakable: the entries overlap and share an
+    // end address. Whenever extents overlap they belong to one function, so
+    // take the earliest start and the furthest end.
+    std::vector<std::pair<uint32_t, uint32_t>> merged;
+    size_t mergeCount = 0;
+    for (const auto& [start, end] : widened)   // std::map => ascending by start
+    {
+        if (!merged.empty() && start < merged.back().second)
+        {
+            merged.back().second = std::max(merged.back().second, end);
+            ++mergeCount;
+        }
+        else
+        {
+            merged.emplace_back(start, end);
+        }
+    }
+
+    if (mergeCount > 0)
+    {
+        printf("Merged %zu overlapping extent(s) into their enclosing function\n", mergeCount);
+        printf("(multiple switches in one function, split by early returns).\n");
+        printf("Final function count: %zu\n\n", merged.size());
+    }
+
     printf("--- replace the `functions = [...]` block in WoS_config.toml ---\n\n");
     printf("functions = [\n");
-    for (const auto& [start, end] : widened)
+    for (const auto& [start, end] : merged)
     {
         const PdataFunc* orig = containing(start);
-        const uint32_t origEnd = orig ? orig->end : start;
         size_t absorbed = 0;
         for (const auto& f : pdata)
         {
             if (f.begin > start && f.begin < end)
                 ++absorbed;
         }
-        printf("    { address = 0x%08X, size = 0x%X },  # was 0x%X, +%zu record(s)\n",
-            start, end - start, origEnd - start, absorbed);
+        printf("    { address = 0x%08X, size = 0x%X },%s%s\n",
+            start, end - start,
+            orig ? "  # from .pdata" : "  # inferred (not in .pdata)",
+            absorbed ? "  WARNING: spans known record(s)" : "");
     }
     printf("]\n\n");
     printf("Each entry spans from the function's start to its furthest switch\n");
