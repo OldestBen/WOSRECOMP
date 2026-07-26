@@ -28,7 +28,7 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** CPU recompilation working. Not yet compiled, no runtime.
+- **Stage:** CPU code recompiles **and compiles**. No runtime yet — nothing calls it.
 - **Toolchain:** builds clean on Windows (VS 2026, clang-cl 22.1.3, CMake
   4.3.1) and Linux (Clang 18.1.3, CMake 3.28). Five tools:
   `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, plus our `xex_info` and
@@ -47,25 +47,30 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - **Known defects:** 33 switch sites still emit wrong control flow — a
   function/walk alignment problem, diagnosed in the findings log, judged
   diminishing returns for now.
-- **Not started:** compiling the generated C++; the entire `WoSRecomp/`
-  runtime (GPU/APU/kernel/OS/UI); shader recompilation.
+- **Compiled:** `tools/build_ppc.sh` builds the 200 generated translation
+  units into a **192 MB static library in 27 s** (-j14), **zero compile
+  errors**. The memory cap looks conservative — there is clearly headroom.
+- **Not started:** the entire `WoSRecomp/` runtime (kernel/OS shims, GPU,
+  APU, input, filesystem); shader recompilation. Nothing links against
+  `WoSRecompLib` yet, so none of the recompiled code has ever executed.
 
 ## Next Steps (in order)
 
 1. **Re-run the recompile** with the instruction patch applied and confirm
    the 265 unrecognized-instruction warnings are gone.
-2. **Compile the generated C++** — target now exists
-   (`WoSRecompLib/CMakeLists.txt`, driven by `tools/build_ppc.sh`). Verified
-   against synthetic generated sources; **not yet run on the real ~2.4M
-   instruction output**. That run is the next milestone and the first real
-   test of the 32 GB constraint — the script caps parallelism at ~1 job per
-   2 GiB (so -j15 on this machine, not -j32).
-3. Decide whether to revisit the 33 remaining switch sites — see the
-   alignment analysis in the findings log before re-attempting.
-4. Locate `setjmp`/`longjmp` (look for `RtlUnwind` callers) if error-path
+2. ~~Compile the generated C++~~ **DONE** — 200 TUs, 192 MB lib, 27 s, no
+   errors.
+3. **Make it run.** The next milestone is a minimal host that maps the PPC
+   address space, loads the image, initialises a `PPCContext`, and calls the
+   entry point (`0x82B15E38`) — then observes which kernel import it dies
+   on. That failure list *is* the runtime to-do list, derived from the game
+   rather than guessed.
+4. Decide whether to revisit the 33 remaining switch sites — see the
+   alignment analysis in the findings log. They compile, but are wrong at
+   runtime, so they matter more once code actually executes.
+5. Locate `setjmp`/`longjmp` (look for `RtlUnwind` callers) if error-path
    control flow misbehaves.
-5. Only then: the `WoSRecomp/` runtime — kernel/OS shims first, then GPU via
-   XenosRecomp, then APU/input/UI.
+6. Then the rest of the runtime: GPU via XenosRecomp, APU, input, UI.
 
 ---
 

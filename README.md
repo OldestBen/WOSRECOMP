@@ -106,15 +106,17 @@ git submodule update --init --recursive
 
 ## Status
 
-🟡 **CPU recompilation working.** *Web of Shadows*'s PowerPC code translates to
-C++ end-to-end: toolchain builds on Windows and Linux, the XEX is analysed, all
-required config addresses are found and verified, and `XenonRecomp` runs to 100%.
+🟡 **CPU code recompiles and compiles.** *Web of Shadows*'s PowerPC code goes
+from `default.xex` to a **192 MB native static library** — the XEX is analysed,
+all config addresses are found and verified, `XenonRecomp` runs to 100%, and the
+200 generated translation units compile with **zero errors** in 27 s.
 
-Remaining known defects in the generated code: **33 switch sites** with wrong
-control flow (down from 123) and, until the next run confirms it, the **265
-unrecognized instruction sites** now addressed by
-[`patches/`](patches/README.md). Nothing has been *compiled* yet — that is the
-next milestone, and the runtime in [`WoSRecomp/`](WoSRecomp/) is still empty.
+Known defects: **33 switch sites** emit wrong control flow (down from 123).
+They compile fine but are incorrect at runtime.
+
+**Nothing executes yet.** The runtime in [`WoSRecomp/`](WoSRecomp/) is still
+empty, so nothing links against the recompiled code. That's the next milestone
+and the bulk of the remaining project.
 
 See [`PROGRESS.md`](PROGRESS.md) for current state and
 [`docs/05-findings-log.md`](docs/05-findings-log.md) for every address and

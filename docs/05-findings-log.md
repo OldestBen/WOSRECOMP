@@ -258,6 +258,49 @@ in between (the `bl`-scan would then skip them, folding their code into ours
 and breaking calls to them). **Not attempted; diminishing returns versus the
 265 unrecognized instructions.**
 
+## First successful compile — 2026-07-26
+
+**The recompiled code builds.** `tools/build_ppc.sh` on the Windows
+workstation:
+
+```
+==> Jobs: 14  (cores: 32, RAM: 31 GiB -> memory cap 14)
+-- WoSRecompLib: 200 generated source file(s)
+[201/202] Linking CXX static library WoSRecompLib.lib
+Built in 27s with 14 job(s).
+  192M  WoSRecompLib/build/WoSRecompLib.lib
+```
+
+| | |
+|---|---|
+| Generated translation units | **200** |
+| Build time | **27 s** at -j14 |
+| Output | **192 MB** static library |
+| Compile errors | **zero** |
+
+### What this proves
+
+The generated C++ is **valid and complete enough to compile**, including
+all 15 instructions added this session. ~2.4M PPC instructions are now
+native x86-64 object code.
+
+### What it does *not* prove
+
+Compiling is not running. The 33 known-bad switch sites emit `// ERROR:`
+comments in place of jumps — that code compiles fine and is simply *wrong*
+at runtime. Nothing calls into this library yet.
+
+### Predictions that were wrong
+
+- **Build time.** I said "minutes, not seconds"; it took **27 seconds**.
+  The 9950X3D is much faster at this than I assumed.
+- **Memory pressure.** I capped at ~1 job per 2 GiB expecting large
+  translation units. 200 files finishing in 27 s at -j14 implies real
+  headroom — the cap is probably conservative. `JOBS=24` or higher is
+  likely fine and worth trying if rebuild time ever matters.
+- **Compile errors.** I expected some, particularly around the broken
+  switch sites. There were none.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*
