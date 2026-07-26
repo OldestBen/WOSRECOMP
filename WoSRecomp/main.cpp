@@ -37,6 +37,7 @@
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
+#  include <dbghelp.h>
 #else
 #  include <sys/mman.h>
 #endif
@@ -72,6 +73,19 @@ constexpr uint64_t kTotalSize       = kFuncTableOffset + kFuncTableSize;
 // was misdiagnosed the first time.
 constexpr uint64_t kGuestReserve = PPC_MEMORY_SIZE;
 static_assert(kGuestReserve >= kTotalSize, "guest reservation must cover the function table");
+
+// Scratch guest stack, just below the image. Grows downward.
+constexpr uint32_t kStackTop  = uint32_t(PPC_IMAGE_BASE) - 0x1000;
+constexpr uint32_t kStackSize = 0x40000;
+
+// How far the guest stack may grow before we call it a runaway rather than a
+// deep call tree. Real startup code does not need megabytes.
+constexpr uint64_t kStackRunawayLimit = 2ull << 20;
+
+// Everything within this much of kStackTop is treated as stack for the
+// purpose of runaway detection. Generous, because we do not know how the
+// guest's own allocator will lay things out later.
+constexpr uint64_t kStackRegionSpan = 256ull << 20;
 
 uint8_t* ReserveGuestMemory()
 {
@@ -157,7 +171,72 @@ std::string CleanName(const std::string& raw)
 // off to get a hard fault at the first bad access.
 std::atomic<uint64_t> g_autoCommitBytes{0};
 std::atomic<uint64_t> g_autoCommitCount{0};
+std::atomic<uint64_t> g_stackCommitBytes{0};
 bool g_autoCommit = true;
+
+// Name the recompiled functions currently on the host stack.
+//
+// Recompiled guest functions are ordinary C++ functions called normally, so
+// the host stack *is* the guest call stack, and a runaway guest stack shows
+// up as a deep host stack full of sub_XXXXXXXX frames. Symbolising the top of
+// it turns "something recurses" into the actual cycle, which is the only
+// question worth answering here. RelWithDebInfo gives us the PDB for free.
+void PrintGuestBacktrace(unsigned frameCount = 40)
+{
+    static constexpr unsigned kMaxFrames = 96;
+    void* frames[kMaxFrames];
+    const USHORT captured = CaptureStackBackTrace(
+        1, frameCount < kMaxFrames ? frameCount : kMaxFrames, frames, nullptr);
+
+    if (captured == 0)
+    {
+        printf("  (no frames captured — recompiled code may lack unwind info)\n");
+        return;
+    }
+
+    const HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+    SymInitialize(proc, nullptr, TRUE);
+
+    alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+    auto* sym = reinterpret_cast<SYMBOL_INFO*>(buffer);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = MAX_SYM_NAME;
+
+    for (USHORT i = 0; i < captured; ++i)
+    {
+        DWORD64 disp = 0;
+        if (SymFromAddr(proc, reinterpret_cast<DWORD64>(frames[i]), &disp, sym))
+            printf("  #%-3u %s +0x%llX\n", i, sym->Name, (unsigned long long)disp);
+        else
+            printf("  #%-3u %p  (no symbol)\n", i, frames[i]);
+    }
+
+    SymCleanup(proc);
+}
+
+// Called when the guest stack has grown past anything plausible. Reports and
+// exits, rather than letting the host stack overflow — a stack overflow
+// leaves no room to run an exception filter, so the process just dies
+// silently and the whole trace is lost. That is exactly what happened on the
+// run that first reached 15 imports.
+[[noreturn]] void ReportRunawayStack(uint64_t guest)
+{
+    printf("\n=== RUNAWAY GUEST STACK ===\n");
+    printf("The guest stack has grown past %llu MiB (now at 0x%08" PRIX64 ", started at 0x%08X).\n",
+        (unsigned long long)(kStackRunawayLimit >> 20), guest, kStackTop);
+    printf("That is unbounded recursion, not a deep call tree.\n\n");
+    printf("Recompiled functions on the stack, innermost first:\n");
+    PrintGuestBacktrace();
+    printf("\nRepeated names above are the cycle. The usual cause at this stage\n");
+    printf("is an import stub that returns nothing, so the caller reads a stale\n");
+    printf("register as a result and retries forever.\n");
+
+    wos::DumpImportLogUnsafe();
+    fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), 3);
+    __builtin_unreachable();
+}
 
 constexpr uint64_t kAutoCommitGranularity = 0x10000;   // 64 KiB
 constexpr uint64_t kAutoCommitCeiling     = 512ull << 20;
@@ -192,6 +271,17 @@ LONG WINAPI GuestPageCommitter(EXCEPTION_POINTERS* info)
 
     g_autoCommitBytes.fetch_add(kAutoCommitGranularity, std::memory_order_relaxed);
     const uint64_t n = g_autoCommitCount.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    // Growth below the initial scratch stack, in the stack's neighbourhood.
+    if (region < kStackTop && region + kStackRegionSpan >= kStackTop)
+    {
+        const uint64_t grown =
+            g_stackCommitBytes.fetch_add(kAutoCommitGranularity, std::memory_order_relaxed)
+            + kAutoCommitGranularity;
+
+        if (grown >= kStackRunawayLimit)
+            ReportRunawayStack(guest);
+    }
 
     if (n <= kAutoCommitLogLimit)
     {
@@ -312,7 +402,7 @@ int main(int argc, char** argv)
     setvbuf(stdout, nullptr, _IONBF, 0);
 
 #ifdef _WIN32
-    g_autoCommit = (getenv("WOS_NO_AUTOCOMMIT") == nullptr);
+    g_autoCommit = (GetEnvironmentVariableA("WOS_NO_AUTOCOMMIT", nullptr, 0) == 0);
     // First in the chain, so it sees the fault before the unhandled filter.
     AddVectoredExceptionHandler(1, GuestPageCommitter);
     SetUnhandledExceptionFilter(CrashReporter);
@@ -489,8 +579,6 @@ int main(int argc, char** argv)
     // r1 is the stack pointer. Point it at a scratch region inside the guest
     // space rather than 0, so the very first prologue store doesn't fault
     // before executing a single useful instruction.
-    constexpr uint32_t kStackTop = uint32_t(PPC_IMAGE_BASE) - 0x1000;
-    constexpr uint32_t kStackSize = 0x40000;
     if (!CommitRange(base, kStackTop - kStackSize, kStackSize + 0x1000))
     {
         fprintf(stderr, "Failed to commit a scratch stack.\n");

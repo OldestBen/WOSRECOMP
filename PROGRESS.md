@@ -28,13 +28,15 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **Recompiled game code is executing.** The harness maps the
-  image, populates 50,516 function-table entries, resolves the entry point
-  (guest `0x82B15E38` -> host) and calls it. Execution reached ~0x41993
-  bytes into the recompiled code before faulting on a read of guest
-  `0x93010000` — an Xbox 360 physical-memory alias the old 2.06 GiB
-  reservation didn't cover. Now reserving the full 4 GiB with commit-on-
-  first-touch. No imports reached yet.
+- **Stage:** **The game boots far enough to call the kernel.** 15 imports
+  reached in real boot order, starting with `NtAllocateVirtualMemory` — the
+  list is in [`docs/05-findings-log.md`](docs/05-findings-log.md) and is the
+  runtime to-do list, in priority order. It then blows the stack in
+  unbounded recursion, almost certainly because every import stub returns
+  without setting `r3`, so callers read stale registers as results.
+- **Next concrete step:** implement imports 1–15 for real, starting with a
+  guest allocator behind `NtAllocateVirtualMemory`. Nothing downstream can
+  work without a heap.
 - **Toolchain:** builds clean on Windows (VS 2026, clang-cl 22.1.3, CMake
   4.3.1) and Linux (Clang 18.1.3, CMake 3.28). Five tools:
   `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, plus our `xex_info` and
@@ -94,6 +96,11 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
      meaning unimplemented imports return silently. The XEX import table
      (`xex_info private/default.xex --imports`) is the real source, and the
      boot-order trace from the harness is what says which to do first.
+3b. **Implement the boot-order imports** (findings log has the ordered list).
+   `NtAllocateVirtualMemory` first — a guest allocator carved out of the
+   4 GiB reservation. Then the TLS trio, the critical-section family, and
+   the config/query calls. Every stub currently leaves `r3` untouched, so
+   callers read stale registers; that alone may explain the recursion.
 4. Decide whether to revisit the 33 remaining switch sites — see the
    alignment analysis in the findings log. They compile, but are wrong at
    runtime, so they matter more once code actually executes.
@@ -104,6 +111,39 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (6) — 15 imports reached; runaway stack made self-reporting
+
+- **The import trace exists.** Commit-on-first-touch worked: the first fault
+  (guest `0x93010000`) was committed and execution resumed straight into
+  `NtAllocateVirtualMemory`, then 14 more imports. Full ordered list in the
+  findings log — that is the runtime to-do list, in the game's own priority
+  order, which was the entire point of building the harness.
+- Two logged first-touches give away the underlying problem: guest
+  `0x00000014` and `0xFFFFFFFD`. Import thunks are `nop/nop/nop/blr` and our
+  stubs only log, so `r3` keeps whatever the caller left. The game reads a
+  stale register as a return value and dereferences it.
+- `KeBugCheck` at #14 is the kernel-panic call. The game was already trying
+  to die before the stack ran away.
+- **The runaway itself:** 26 consecutive 64 KiB regions descending from
+  `0x81FB0000` to `0x81E20000`, each first touched near the top by a write.
+  A stack pointer walking down, ~15,000 frames deep.
+- **It died with no crash report**, which is itself a finding: recompiled
+  guest functions are ordinary C++ calls, so guest depth is host depth, and
+  the default 1 MiB host stack overflowed. A stack overflow leaves no stack
+  to run an exception filter on, so the process dies silently and takes the
+  trace with it.
+- Fixed both ends: **256 MiB host stack** so the detector wins the race, and
+  **runaway detection** that prints a `dbghelp`-symbolised backtrace of the
+  recompiled functions on the stack. Repeated `sub_XXXXXXXX` names name the
+  cycle directly.
+- Stack-region predicate unit-tested against the actual regions from the
+  run: the four non-stack commits are correctly excluded, the three stack
+  commits included, boundaries checked. Fires at 32 commits; the real run
+  reached 26 before dying.
+- Deliberately did **not** change the stubs to zero `r3` this round. It is
+  very likely part of the fix, but changing stub semantics at the same time
+  as adding the backtrace would confound the one measurement worth taking.
 
 ### 2026-07-26 (5) — Recompiled code runs; guest space widened to the full 4 GiB
 

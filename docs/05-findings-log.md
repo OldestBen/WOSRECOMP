@@ -556,6 +556,73 @@ is logged (first 48 individually), a 512 MiB ceiling stops runaway commits,
 and `WOS_NO_AUTOCOMMIT=1` restores hard faults for when the fault location
 matters more than progress.
 
+## Boot order — the first 15 imports the game actually calls (2026-07-26)
+
+The point of the whole harness. This is *Web of Shadows* asking for things in
+its own order, not 214 names sorted alphabetically. Implement top-down.
+
+| # | Import | Notes |
+|---|---|---|
+| 1 | `NtAllocateVirtualMemory` | **First thing it wants.** Currently returns nothing, so the game has no heap. |
+| 2 | `HalReturnToFirmware` | Reboot/shutdown. Reached this early = something already went wrong, or it is a probe. |
+| 3 | `RtlEnterCriticalSection` | |
+| 4 | `RtlLeaveCriticalSection` | |
+| 5 | `XexCheckExecutablePrivilege` | |
+| 6 | `XGetAVPack` | A/V pack detection — display capability query |
+| 7 | `ExGetXConfigSetting` | System config (language, region, ...) |
+| 8 | `KeTlsAlloc` | |
+| 9 | `KeTlsSetValue` | |
+| 10 | `KeTlsGetValue` | TLS trio — the CRT needs these working |
+| 11 | `KeQuerySystemTime` | |
+| 12 | `RtlInitializeCriticalSection` | Note: called *after* Enter/Leave above |
+| 13 | `RtlInitAnsiString` | |
+| 14 | `KeBugCheck` | **Kernel panic.** The game is trying to die. |
+| 15 | `KeGetCurrentProcessType` | |
+
+Then the guest stack ran away (see below).
+
+### Reads that reveal garbage returns
+
+Auto-commit logged first touches at guest `0x00000014` and `0xFFFFFFFD`.
+Neither is a plausible allocation. Import thunks are rewritten to
+`nop/nop/nop/blr` and our stubs only log, so **`r3` keeps whatever the caller
+left in it** — the game reads a stale register as a return value and
+dereferences it. `0x14` is a field offset from a null pointer; `0xFFFFFFFD`
+is `-3`.
+
+Also logged: guest `0x93010000`, `0x59000000` and `0xAD000000` — physical
+aliases, plausible enough to be real, but with no allocator behind them they
+are equally likely to be garbage.
+
+## Runaway guest stack after import 15 (2026-07-26)
+
+After `KeGetCurrentProcessType`, auto-commit logged 26 consecutive 64 KiB
+regions descending from `0x81FB0000` to `0x81E20000`, each first touched near
+the top of the region by a **write**. That is a stack pointer walking
+downward — unbounded recursion, roughly 15,000 frames deep at the observed
+frame sizes.
+
+The process then died with **no crash report at all**. Cause: recompiled
+guest functions are ordinary C++ functions, so guest call depth *is* host
+call depth, and the default 1 MiB host stack overflowed. A stack overflow
+leaves no stack on which to run an exception filter, so the process is
+terminated without one — losing the entire trace.
+
+Two changes, so the failure reports itself:
+
+- **256 MiB host stack** (`/STACK:268435456`, reserved not committed), so the
+  guest-stack runaway detector wins the race against host stack exhaustion.
+- **Runaway detection** in the page committer: growth below `kStackTop`
+  within `kStackRegionSpan` is accumulated, and past 2 MiB it prints a
+  `dbghelp`-symbolised backtrace of the recompiled functions on the stack,
+  dumps the import trace, and exits. Repeated `sub_XXXXXXXX` names in that
+  backtrace *are* the cycle.
+
+The predicate is unit-tested against the regions from the real run:
+`0x93010000`, `0x59000000`, `0x00000000`, `0xAD000000` are correctly not
+counted as stack; `0x81FB0000`, `0x81F00000`, `0x81E20000` are. It fires at
+32 commits; the real run reached 26 before dying.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*

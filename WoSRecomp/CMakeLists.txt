@@ -57,6 +57,24 @@ target_include_directories(WoSRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/kernel
 target_compile_definitions(WoSRecomp PRIVATE NOMINMAX)
 target_link_libraries(WoSRecomp PRIVATE WoSRecompLib XenonUtils)
 
+if(WIN32)
+    # dbghelp: symbolises the host stack so a runaway guest stack reports the
+    # actual sub_XXXXXXXX cycle instead of "it recursed somewhere".
+    target_link_libraries(WoSRecomp PRIVATE dbghelp)
+
+    # Recompiled guest functions are ordinary C++ calls, so guest call depth is
+    # host stack depth. The default 1 MiB overflows after a few thousand guest
+    # frames — and a stack overflow leaves no room to run an exception filter,
+    # so the process dies silently and takes the whole trace with it. 256 MiB
+    # of reserved (not committed) stack lets the runaway detector in main.cpp
+    # win the race and actually report.
+    if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        target_link_options(WoSRecomp PRIVATE /STACK:268435456)
+    else()
+        target_link_options(WoSRecomp PRIVATE -Wl,--stack,268435456)
+    endif()
+endif()
+
 if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     target_compile_options(WoSRecomp PRIVATE /clang:-march=sandybridge)
 else()
