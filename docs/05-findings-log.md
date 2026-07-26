@@ -301,6 +301,57 @@ at runtime. Nothing calls into this library yet.
 - **Compile errors.** I expected some, particularly around the broken
   switch sites. There were none.
 
+## Kernel/OS imports — the runtime to-do list (2026-07-26)
+
+From `xex_info private/default.xex --imports`. **214 imported functions
+across 12 subsystems.** This is the complete surface the runtime must cover,
+enumerated from the game rather than guessed.
+
+| Subsystem | Count | Notes |
+|---|---:|---|
+| Xam (system/UI) | 37 | profiles, content/saves, message boxes, **input** |
+| Nt (kernel objects) | 27 | files, events, memory, threads |
+| Ke (kernel core) | 26 | threading, TLS, synchronisation, timing |
+| other | 36 | networking (15), STFS, CRT (`sprintf`/`_snprintf`), `XGetLanguage` |
+| Rtl (runtime library) | 20 | mostly maps onto the C library |
+| Vd (video driver) | 20 | **the hard one** — ring buffer, EDRAM, `VdSwap` |
+| Xe (GPU/crypto) | 12 | actually XeCrypt (MD5/SHA) + Xex module queries |
+| Io (file I/O) | 9 | device layer |
+| Audio | 8 | XAudio render driver + XMA decode |
+| Mm (memory manager) | 7 | physical memory |
+| Ex (executive) | 6 | pools, `ExCreateThread` |
+| Ob (object manager) | 6 | handles, symbolic links |
+
+### Things worth noticing
+
+- **Input is three functions.** `XamInputGetState`, `XamInputSetState`,
+  `XamInputGetCapabilities`. Mapping an XInput pad onto these is nearly
+  trivial, and the 360 controller layout maps 1:1.
+- **There is no graphics API to implement.** The 360 talks to the GPU by
+  writing command buffers, so the `Vd*` functions are ring-buffer and display
+  plumbing, not draw calls. Rendering means interpreting the Xenos command
+  stream — the single biggest piece of work in the project.
+- **Networking (15 `NetDll_*`) can almost certainly be stubbed** to
+  "no network" for a single-player port.
+- **`RtlUnwind` is at 0x82BDC94C.** `docs/02-config-guide.md` says the way to
+  find `longjmp` is to look for `RtlUnwind` callers, with `setjmp` usually
+  adjacent — so this is the lead for the still-unlocated
+  `longjmp_address`/`setjmp_address` config fields.
+- **`CurlOpenTitleBackingFile`** is not a standard Xbox 360 export. Either a
+  Shaba/Activision addition or a mis-resolved ordinal — worth a look before
+  trusting it.
+- **`StfsCreateDevice`/`StfsControlDevice`** — STFS is the 360 save/content
+  package format, so these matter for save handling.
+
+### Why a static list isn't enough
+
+Unimplemented imports fail **silently**: XenonUtils rewrites each thunk to
+`nop/nop/nop/blr`, so a missing function returns immediately and the game
+misbehaves without saying why. `xex_info --emit-stubs` therefore generates a
+logging stub per import, and the host prints them in call order — turning
+214 alphabetical names into the game's actual boot sequence, which is what
+tells you *which* to implement next.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*

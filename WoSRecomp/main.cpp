@@ -30,6 +30,7 @@
 #include <image.h>
 
 #include "ppc_recomp_shared.h"
+#include "import_log.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -211,6 +212,8 @@ int main(int argc, char** argv)
     fflush(stdout);
 
     entry(ctx, base);
+
+    wos::DumpImportLog();
 
     printf("\nReturned from the entry point without faulting.\n");
     printf("Given imports are stubbed to nop/blr, that most likely means it ran\n");
