@@ -56,7 +56,21 @@ echo
 START_EPOCH="$(date +%s)"
 # Capture combined stdout+stderr while still showing it live.
 # PIPESTATUS[0] preserves the command's real exit code past the tee pipe.
-"$@" 2>&1 | tee "$LOG_FILE"
+#
+# Force line buffering where possible. C stdio switches from line-buffered to
+# fully buffered (~4 KB) when stdout is a pipe rather than a terminal, so a
+# quiet, long-running program piped into tee looks frozen — output only
+# appears once the buffer fills. That is indistinguishable from a hang and
+# has already cost one false alarm. stdbuf isn't present in every
+# environment (notably some Git Bash installs), so fall back cleanly.
+if command -v stdbuf >/dev/null 2>&1; then
+    stdbuf -oL -eL "$@" 2>&1 | tee "$LOG_FILE"
+else
+    echo "note: stdbuf not found — output may appear in bursts rather than" >&2
+    echo "      live. Progress is still being written to the log; check with" >&2
+    echo "      'ls -l ${LOG_FILE#$REPO_ROOT/}' if it looks stalled." >&2
+    "$@" 2>&1 | tee "$LOG_FILE"
+fi
 EXIT_CODE="${PIPESTATUS[0]}"
 END_EPOCH="$(date +%s)"
 DURATION=$(( END_EPOCH - START_EPOCH ))
