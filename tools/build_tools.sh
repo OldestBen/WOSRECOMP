@@ -84,6 +84,7 @@ echo "==> Using $CXX_BIN (Clang ${CLANG_MAJOR:-unknown}), $JOBS parallel jobs"
 # llvm-lib.exe is the lib.exe-compatible archiver and ships in the same
 # LLVM bin directory, so pin CMAKE_AR to it explicitly.
 TOOLCHAIN_ARGS=()
+WANT_AR=""
 if [ "$IS_WINDOWS" -eq 1 ] && [ "$(basename "$CC_BIN")" = "clang-cl" ]; then
     _clang_cl="$(command -v clang-cl 2>/dev/null || true)"
     if [ -n "$_clang_cl" ]; then
@@ -94,6 +95,7 @@ if [ "$IS_WINDOWS" -eq 1 ] && [ "$(basename "$CC_BIN")" = "clang-cl" ]; then
             if command -v cygpath >/dev/null 2>&1; then
                 _ar="$(cygpath -m "$_ar")"
             fi
+            WANT_AR="$_ar"
             TOOLCHAIN_ARGS+=(-DCMAKE_AR="$_ar")
             echo "==> Archiver: $_ar"
             break
@@ -121,14 +123,58 @@ fi
 #   CMAKE_ARGS="-DCMAKE_POLICY_DEFAULT_CMP0141=OLD" ./tools/build_tools.sh
 read -ra CMAKE_EXTRA_ARGS <<< "${CMAKE_ARGS:-}"
 
+# Strip directories and any .exe suffix, so "clang-cl" compares equal to
+# "C:/.../clang-cl.exe".
+tool_basename() {
+    local b
+    b="$(basename "${1:-}")"
+    printf '%s' "${b%.[eE][xX][eE]}"
+}
+
+# Read a cache entry, e.g. cache_value <cache> CMAKE_AR
+cache_value() {
+    sed -n "s/^$2:[^=]*=//p" "$1" 2>/dev/null | head -1
+}
+
 build_one() {
     local name="$1"
     local src_dir="$SCRIPT_DIR/$name"
     local build_dir="$src_dir/build"
+    local cache="$build_dir/CMakeCache.txt"
 
     if [ ! -f "$src_dir/CMakeLists.txt" ]; then
         echo "error: $src_dir is missing/empty — did you run 'git submodule update --init --recursive'?" >&2
         exit 1
+    fi
+
+    # A CMake build tree pins its toolchain at the FIRST configure: the
+    # generated CMakeFiles/<ver>/CMakeCCompiler.cmake does a plain
+    # set(CMAKE_AR ...) which is re-included on every reconfigure and
+    # shadows anything passed with -D. So changing compiler or archiver
+    # requires wiping the tree — reconfiguring silently keeps the old tool
+    # while *appearing* to accept the new flag.
+    if [ "${CLEAN:-0}" != "0" ] && [ -d "$build_dir" ]; then
+        echo "==> CLEAN set; wiping $name/build"
+        rm -rf "$build_dir"
+    elif [ -f "$cache" ]; then
+        local cached_cc cached_ar wipe=0
+        cached_cc="$(cache_value "$cache" CMAKE_C_COMPILER)"
+        cached_ar="$(cache_value "$cache" CMAKE_AR)"
+
+        if [ -n "$cached_cc" ] && \
+           [ "$(tool_basename "$cached_cc")" != "$(tool_basename "$CC_BIN")" ]; then
+            echo "==> Compiler changed ($(tool_basename "$cached_cc") -> $(tool_basename "$CC_BIN"))"
+            wipe=1
+        fi
+        if [ -n "$WANT_AR" ] && [ -n "$cached_ar" ] && \
+           [ "$(tool_basename "$cached_ar")" != "$(tool_basename "$WANT_AR")" ]; then
+            echo "==> Archiver changed ($(tool_basename "$cached_ar") -> $(tool_basename "$WANT_AR"))"
+            wipe=1
+        fi
+        if [ "$wipe" -eq 1 ]; then
+            echo "==> Wiping stale $name/build so the new toolchain takes effect"
+            rm -rf "$build_dir"
+        fi
     fi
 
     echo "==> Configuring $name"
