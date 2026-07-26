@@ -15,7 +15,7 @@ Layout mirrors the submodule name:
 ```
 patches/
 └── XenonRecomp/
-    └── 0001-implement-missing-instructions.patch
+    └── 0001-wos-recompiler-fixes.patch
 ```
 
 ## How they're applied
@@ -87,10 +87,27 @@ git stash pop
 
 ## Current patches
 
-### `XenonRecomp/0001-implement-missing-instructions.patch`
+### `XenonRecomp/0001-wos-recompiler-fixes.patch`
 
-Implements 15 PPC opcodes the recompiler didn't handle, which appeared 265
-times across *Web of Shadows*'s `.text` and would otherwise have been
-silently skipped. See the instruction table in
+Two unrelated changes, kept in one file because the drift check compares the
+submodule's whole `git diff HEAD` against the concatenation of these patches
+— two patches touching the same file could not reproduce that byte for byte.
+
+**1. Missing instructions.** Implements 15 PPC opcodes the recompiler didn't
+handle, which appeared 265 times across *Web of Shadows*'s `.text` and would
+otherwise have been silently skipped. See the instruction table in
 [`docs/05-findings-log.md`](../docs/05-findings-log.md) for the per-opcode
 approach and how it was verified.
+
+**2. Stale output files.** `Recompiler::Recompile` writes its output as
+`ppc_recomp.0.cpp … ppc_recomp.N.cpp` and skips rewriting any file whose
+contents didn't change, so incremental builds stay cheap. Nothing ever
+*deletes* a file, though — so when a run produces fewer chunks than the run
+before it (which happens on any config change that reduces the function
+count), the surplus files survive holding code for the old boundaries.
+
+That builds fine: a static library is never checked for duplicate symbols.
+It only surfaces when an executable is finally linked against it, as
+`duplicate symbol: sub_XXXXXXXX` defined in two different chunk files. The
+patch removes `ppc_recomp.N.cpp` upward from the current file count once
+generation finishes.

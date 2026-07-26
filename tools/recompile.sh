@@ -43,6 +43,30 @@ echo "==> Running XenonAnalyse (jump table detection)"
 echo "==> Running XenonRecomp (PPC -> C++)"
 "$XENON_RECOMP" "$CONFIG_TOML" "$PPC_CONTEXT"
 
+# XenonRecomp writes ppc_recomp.0.cpp .. ppc_recomp.N-1.cpp and (with our
+# patch) deletes any higher-numbered files a previous, longer run left
+# behind. Without that prune, the strays compile fine and only surface as
+# "duplicate symbol" when an executable is finally linked — so check the
+# indices really are contiguous from 0, which is what the prune guarantees.
+PPC_DIR="$REPO_ROOT/WoSRecompLib/ppc"
+if compgen -G "$PPC_DIR/ppc_recomp.*.cpp" >/dev/null; then
+    count=$(ls "$PPC_DIR"/ppc_recomp.*.cpp | wc -l)
+    missing=""
+    for ((i = 0; i < count; i++)); do
+        [ -f "$PPC_DIR/ppc_recomp.$i.cpp" ] || missing="$missing $i"
+    done
+
+    echo "==> $count generated chunk(s) in WoSRecompLib/ppc/"
+    if [ -n "$missing" ]; then
+        echo >&2
+        echo "error: chunk indices are not contiguous — missing:$missing" >&2
+        echo "       That means WoSRecompLib/ppc/ holds files from more than one" >&2
+        echo "       recompiler run, and linking will fail with duplicate symbols." >&2
+        echo "       Delete WoSRecompLib/ppc/ppc_recomp.*.cpp and re-run this script." >&2
+        exit 1
+    fi
+fi
+
 echo
 echo "Done. Generated C++ should be in WoSRecompLib/ppc/ (per out_directory_path"
 echo "in $CONFIG_TOML)."

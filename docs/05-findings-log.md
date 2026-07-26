@@ -290,6 +290,11 @@ Compiling is not running. The 33 known-bad switch sites emit `// ERROR:`
 comments in place of jumps — that code compiles fine and is simply *wrong*
 at runtime. Nothing calls into this library yet.
 
+**It also does not prove the library is internally consistent** — see the
+next section. Archiving object files into a `.lib` never checks whether two
+of them define the same symbol; only linking an executable does. "Zero
+errors" here was a weaker result than it looked.
+
 ### Predictions that were wrong
 
 - **Build time.** I said "minutes, not seconds"; it took **27 seconds**.
@@ -300,6 +305,70 @@ at runtime. Nothing calls into this library yet.
   likely fine and worth trying if rebuild time ever matters.
 - **Compile errors.** I expected some, particularly around the broken
   switch sites. There were none.
+
+## First host link — duplicate symbols from stale generated files (2026-07-26)
+
+First attempt to link `WoSRecomp.exe` against `WoSRecompLib.lib`. All 229
+targets compiled; the link failed:
+
+```
+lld-link: error: duplicate symbol: __declspec(dllimport) _sub_82BD6F50
+>>> defined at WoSRecompLib\ppc\ppc_recomp.194.cpp:1649
+>>>            WoSRecompLib.lib(ppc_recomp.194.cpp.obj)
+>>> defined at WoSRecompLib.lib(ppc_recomp.197.cpp.obj)
+```
+
+~20 of these, all in `0x82BD6F50..0x82BD7050` at 8/16-byte spacing, then
+`too many errors emitted, stopping now`.
+
+### Cause
+
+`Recompiler::Recompile` emits its output through `SaveCurrentOutData()`,
+which:
+
+1. names each chunk `ppc_recomp.{cppFileIndex}.cpp` and increments, and
+2. hash-compares against the existing file and skips the write if identical,
+   so unchanged chunks don't trigger a C++ recompile.
+
+Neither step deletes anything. So whenever a run emitted **fewer** chunks
+than the run before it — which happens on any config change that reduces the
+function count — the previous run's surplus files stayed in
+`WoSRecompLib/ppc/`, holding the same functions under the old boundaries.
+`WoSRecompLib/CMakeLists.txt` globs the directory, so they were compiled in.
+
+The address clustering is the diagnostic tell. `.text` ends at `0x82BDC9AC`,
+and chunks are written in ascending base order, so the last chunk of any run
+holds the highest addresses. Leftovers are therefore *always* top-of-`.text`
+duplicates. A duplicate arising from an analysis bug would be scattered.
+
+### Why it stayed hidden
+
+`llvm-lib`/`ar` do not diagnose duplicate symbols across members — that is
+the linker's job, and nothing had ever been linked. The library had been
+built successfully several times with this already broken.
+
+### What it was *not*
+
+Initially suspected `Recompiler::Analyse`'s `functions` vector, which is
+sorted by base at `recompiler.cpp:254` and **never deduplicated** (no
+`std::unique` or `erase` exists in the file). That's true but irrelevant
+here: three of the four sites appending to `functions` are guarded by
+`image.symbols.find()`, and `config.functions` — the unguarded one — had no
+repeated addresses. Worth recording separately:
+
+> `SymbolTable::find(address)` (in `XenonUtils/symbol_table.h`) resolves via
+> `equal_range(address)`, so it matches an **exact** start address, not
+> containment. A function spanning `[X, X+N)` does not shadow a `bl` target
+> at `X+4`. Overlapping functions are consequently normal in XenonRecomp
+> output and are not, by themselves, a defect.
+
+### Fix
+
+`patches/XenonRecomp/0001-wos-recompiler-fixes.patch` now also deletes
+`ppc_recomp.N.cpp` for N counting up from the final `cppFileIndex` until one
+is missing, printing each removal. Upstream's incremental behaviour is
+untouched. **`build_ppc.sh` does not do this — the prune happens inside
+`recompile.sh`, so a stale tree needs a regenerate, not just a rebuild.**
 
 ## Kernel/OS imports — the runtime to-do list (2026-07-26)
 

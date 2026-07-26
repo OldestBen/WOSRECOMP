@@ -4,9 +4,17 @@
 # parsing, so the harness loads the image with exactly the same code the
 # recompiler used) and WoSRecompLib (the recompiled game code).
 #
-# Expect this to FAIL TO LINK at first. That is the point: every undefined
-# symbol is a kernel/OS import Web of Shadows calls that we have not
-# implemented yet, and that list is the runtime to-do list.
+# NOTE: this links cleanly with nothing implemented, and that is NOT a good
+# sign — it used to say the opposite here. Every recompiled function is
+# emitted as a weak alias, so no game function is ever undefined, and
+# XenonUtils rewrites each import thunk to nop/nop/nop/blr, so unimplemented
+# imports return silently rather than failing to link. The runtime to-do list
+# comes from the XEX import table (xex_info --imports) and from the boot-order
+# trace the harness prints, not from linker errors. See main.cpp.
+#
+# The one thing the link DOES catch is inconsistency in the generated code —
+# a duplicate symbol here means WoSRecompLib/ppc/ holds chunk files from two
+# different recompiler runs. Re-run tools/recompile.sh, which prunes them.
 
 cmake_minimum_required(VERSION 3.20)
 project("WoSRecomp" CXX C)

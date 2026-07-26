@@ -1,5 +1,5 @@
 diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
-index fa91527..39fe059 100644
+index fa91527..45c4acb 100644
 --- a/XenonRecomp/recompiler.cpp
 +++ b/XenonRecomp/recompiler.cpp
 @@ -688,10 +688,22 @@ bool Recompiler::Recompile(
@@ -181,3 +181,41 @@ index fa91527..39fe059 100644
      case PPC_INST_VSUBFP:
      case PPC_INST_VSUBFP128:
          printSetFlushMode(true);
+@@ -2617,6 +2706,37 @@ void Recompiler::Recompile(const std::filesystem::path& headerFilePath)
+     }
+ 
+     SaveCurrentOutData();
++
++    // Delete ppc_recomp.N.cpp files left behind by an earlier, longer run.
++    //
++    // SaveCurrentOutData() writes with a monotonically increasing index and
++    // skips rewriting a file whose contents are unchanged, so that a rebuild
++    // only recompiles what actually moved. Neither step ever removes a file:
++    // if a previous run emitted more chunks than this one, the surplus files
++    // stay in the output directory and the build still picks them up.
++    //
++    // They hold valid-looking C++ for the *previous* function boundaries, so
++    // nothing complains until link time — a static library is not checked for
++    // duplicate symbols, only an executable linked against it is. The result
++    // is a build that succeeds for a long time and then fails with
++    // "duplicate symbol: sub_XXXXXXXX" defined in two different chunk files.
++    {
++        std::string directoryPath = config.directoryPath;
++        if (!directoryPath.empty())
++            directoryPath += "/";
++
++        for (size_t i = cppFileIndex; ; i++)
++        {
++            const std::filesystem::path stalePath =
++                fmt::format("{}{}/ppc_recomp.{}.cpp", directoryPath, config.outDirectoryPath, i);
++
++            std::error_code ec;
++            if (!std::filesystem::remove(stalePath, ec))
++                break;
++
++            fmt::println("Removed stale output file from a previous run: ppc_recomp.{}.cpp", i);
++        }
++    }
+ }
+ 
+ void Recompiler::SaveCurrentOutData(const std::string_view& name)
