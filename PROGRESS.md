@@ -28,12 +28,13 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **The harness links and runs.** It loads the XEX and maps 12
-  sections, then faults while mapping — the crash reporter placed it
-  **outside the guest reservation**, i.e. host-side, reading past the end of
-  the decrypted image buffer rather than the game touching bad memory.
-  Section mapping now validates every source range instead of trusting it;
-  next run should get past this to the entry point.
+- **Stage:** **Recompiled game code is executing.** The harness maps the
+  image, populates 50,516 function-table entries, resolves the entry point
+  (guest `0x82B15E38` -> host) and calls it. Execution reached ~0x41993
+  bytes into the recompiled code before faulting on a read of guest
+  `0x93010000` — an Xbox 360 physical-memory alias the old 2.06 GiB
+  reservation didn't cover. Now reserving the full 4 GiB with commit-on-
+  first-touch. No imports reached yet.
 - **Toolchain:** builds clean on Windows (VS 2026, clang-cl 22.1.3, CMake
   4.3.1) and Linux (Clang 18.1.3, CMake 3.28). Five tools:
   `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, plus our `xex_info` and
@@ -103,6 +104,39 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (5) — Recompiled code runs; guest space widened to the full 4 GiB
+
+- **The game's own code executed for the first time.** Section validation
+  worked: `.reloc` (guest `0x82FA1000`, size `0xCCC80`) was the out-of-range
+  section, clamped to the `0x5F000` bytes actually present. Relocation data
+  is unused at runtime, so zeroing the tail is harmless. Everything after
+  that proceeded: 50,516 function-table entries, entry point `0x82B15E38`
+  resolved, and the call made.
+- It then faulted **inside recompiled code** — `+0x41993` from the entry
+  function, same module — reading guest `0x93010000`.
+- **My crash classifier said "host-side bug, not the recompiled game" and
+  was wrong.** It treated anything outside the reservation as host-side,
+  but the reservation only ran to `0x842585C8` while the guest addresses in
+  32 bits. `PPC_LOAD_U32` is `*(uint32_t*)(base + x)` with no masking, and
+  `ppc_context.h` declares `PPC_MEMORY_SIZE 0x100000000`. `0x93010000` is a
+  perfectly ordinary Xbox 360 physical-memory alias.
+- Now reserving the full **4 GiB** (`kGuestReserve = PPC_MEMORY_SIZE`).
+  Reservation is address space, not memory — nothing is committed until
+  touched. A `static_assert` keeps it covering the function table.
+- Added **commit-on-first-touch** via `AddVectoredExceptionHandler`: a guest
+  fault commits the enclosing 64 KiB and resumes. Without it the game dies
+  within a few thousand instructions, long before asking the kernel for
+  anything. The cost is that a wild pointer now reads zeros and wanders on,
+  so: each region is logged (first 48), there's a 512 MiB ceiling, and
+  `WOS_NO_AUTOCOMMIT=1` restores hard faults.
+- Classifier rewritten: image / call-table / physical-alias / user-space /
+  null-ish, with a specific message for a call through an empty call-table
+  slot, which is the next failure mode worth expecting.
+- Verified on Linux that a 4 GiB `PROT_NONE` reservation succeeds and that
+  commit-on-fault-and-resume works (4 addresses incl. `0x93010000` -> 3
+  commits, two sharing a 64 KiB region). The Windows VEH path is the same
+  shape but different APIs, and is compile-checked only.
 
 ### 2026-07-26 (4) — Crash located: XEX section sources aren't bounds-checked
 

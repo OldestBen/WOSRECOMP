@@ -512,6 +512,50 @@ each case rather than trusting the loader.
 (both under 8 chars, so NUL-padded), but any exactly-8-character section
 name is wrong. The harness sanitises at print time via `CleanName()`.
 
+## Guest address space is 4 GiB, not 2.06 GiB (2026-07-26)
+
+First execution of recompiled game code faulted reading guest `0x93010000`.
+
+The harness had been reserving only `PPC_IMAGE_BASE + PPC_IMAGE_SIZE +
+PPC_CODE_SIZE*2` = `0x842585C8` — enough for the image and the indirect-call
+table, and nothing else. But the generated code's memory accessors do no
+masking and no bounds checking:
+
+```c
+#define PPC_LOAD_U32(x)  __builtin_bswap32(*(volatile uint32_t*)(base + (x)))
+#define PPC_MEMORY_SIZE  0x100000000ull
+```
+
+so any 32-bit guest address is a valid host address of `base + x`. The Xbox
+360 maps physical memory through aliases from `0x80000000` upward, and
+`0x93010000` is one of them — an entirely normal address for the game to
+touch, roughly 304 MiB into physical RAM.
+
+**The reservation is now `PPC_MEMORY_SIZE` (4 GiB).** That costs address
+space, not committed memory.
+
+### Diagnostic lesson
+
+The crash reporter classified this as "host-side bug, not the recompiled
+game touching bad memory" — confidently, and wrongly. The rule it applied
+(outside the reservation ⇒ host-side) was only valid if the reservation
+covered the whole guest space, which it didn't. A classifier is only as good
+as the invariant it assumes; that invariant is now enforced by
+`static_assert` and by reserving the full range.
+
+### Commit-on-first-touch
+
+Nothing pre-commits guest memory, and the guest allocates across the whole
+space, so the harness registers a vectored exception handler that commits the
+enclosing 64 KiB on fault and resumes. Without it the game stops within a few
+thousand instructions — long before it calls anything we want to observe.
+
+The trade-off is real: a genuinely wild pointer now reads zeros and lets the
+game continue rather than stopping at the mistake. Mitigations: every region
+is logged (first 48 individually), a 512 MiB ceiling stops runaway commits,
+and `WOS_NO_AUTOCOMMIT=1` restores hard faults for when the fault location
+matters more than progress.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*

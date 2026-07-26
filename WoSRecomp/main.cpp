@@ -26,6 +26,7 @@
 #include <cstring>
 #include <cinttypes>
 #include <string>
+#include <atomic>
 
 #include <file.h>
 #include <image.h>
@@ -57,19 +58,31 @@ constexpr uint64_t kFuncTableOffset = PPC_IMAGE_BASE + PPC_IMAGE_SIZE;
 constexpr uint64_t kFuncTableSize   = PPC_CODE_SIZE * 2;
 constexpr uint64_t kTotalSize       = kFuncTableOffset + kFuncTableSize;
 
-// Reserve the whole range but commit only what we touch. The bottom ~2 GiB
-// below the image base is never used — committing it would waste real memory
-// for nothing.
+// ...but the guest may address anywhere in 32 bits, so RESERVE all of it.
+//
+// PPC_LOAD_U32 is `__builtin_bswap32(*(volatile uint32_t*)(base + (x)))` —
+// no masking, no bounds check. The Xbox 360 maps physical memory at
+// 0x80000000+ with aliases up through 0xFFFFFFFF, and the game does reach
+// them: the first run faulted reading guest 0x93010000, which is 0x93010000
+// past a reservation that stopped at 0x842585C8.
+//
+// Reserving the full 4 GiB costs address space, not memory — nothing is
+// committed until touched. Getting this wrong turns an ordinary guest access
+// into an unexplained crash outside the reservation, which is exactly how it
+// was misdiagnosed the first time.
+constexpr uint64_t kGuestReserve = PPC_MEMORY_SIZE;
+static_assert(kGuestReserve >= kTotalSize, "guest reservation must cover the function table");
+
 uint8_t* ReserveGuestMemory()
 {
 #ifdef _WIN32
     auto* p = static_cast<uint8_t*>(
-        VirtualAlloc(nullptr, kTotalSize, MEM_RESERVE, PAGE_READWRITE));
+        VirtualAlloc(nullptr, kGuestReserve, MEM_RESERVE, PAGE_READWRITE));
     if (p == nullptr)
         fprintf(stderr, "VirtualAlloc reserve failed: %lu\n", GetLastError());
     return p;
 #else
-    void* p = mmap(nullptr, kTotalSize, PROT_NONE,
+    void* p = mmap(nullptr, kGuestReserve, PROT_NONE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED)
     {
@@ -129,6 +142,70 @@ std::string CleanName(const std::string& raw)
 
 #ifdef _WIN32
 
+// Commit guest pages on first touch.
+//
+// The guest's own allocator hands out addresses across the whole 32-bit space
+// and nothing pre-commits them. Without this, the first access to any address
+// we didn't map by hand is fatal, and the game stops within a few thousand
+// instructions of the entry point — long before it asks the kernel for
+// anything, which is the thing we actually want to observe.
+//
+// The cost is that a genuinely wild pointer now reads zeros and lets the game
+// wander on rather than stopping where the mistake was. That trade is right
+// for bring-up and wrong later, so: every distinct region is logged, there is
+// a hard ceiling on how much gets committed, and WOS_NO_AUTOCOMMIT=1 turns it
+// off to get a hard fault at the first bad access.
+std::atomic<uint64_t> g_autoCommitBytes{0};
+std::atomic<uint64_t> g_autoCommitCount{0};
+bool g_autoCommit = true;
+
+constexpr uint64_t kAutoCommitGranularity = 0x10000;   // 64 KiB
+constexpr uint64_t kAutoCommitCeiling     = 512ull << 20;
+constexpr uint64_t kAutoCommitLogLimit    = 48;
+
+LONG WINAPI GuestPageCommitter(EXCEPTION_POINTERS* info)
+{
+    const auto* rec = info->ExceptionRecord;
+
+    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || rec->NumberParameters < 2)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    auto* addr = reinterpret_cast<uint8_t*>(rec->ExceptionInformation[1]);
+
+    if (!g_autoCommit || g_guestBase == nullptr ||
+        addr < g_guestBase || addr >= g_guestBase + g_guestSize)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;   // not ours — let the reporter have it
+    }
+
+    if (g_autoCommitBytes.load(std::memory_order_relaxed) >= kAutoCommitCeiling)
+        return EXCEPTION_CONTINUE_SEARCH;   // runaway; stop and report
+
+    const uint64_t guest = uint64_t(addr - g_guestBase);
+    const uint64_t region = guest & ~(kAutoCommitGranularity - 1);
+
+    if (VirtualAlloc(g_guestBase + region, kAutoCommitGranularity,
+                     MEM_COMMIT, PAGE_READWRITE) == nullptr)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    g_autoCommitBytes.fetch_add(kAutoCommitGranularity, std::memory_order_relaxed);
+    const uint64_t n = g_autoCommitCount.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    if (n <= kAutoCommitLogLimit)
+    {
+        printf("[guest page] commit 0x%08" PRIX64 "  (first touched 0x%08" PRIX64 ", %s)\n",
+            region, guest, rec->ExceptionInformation[0] == 0 ? "read" : "write");
+    }
+    else if (n == kAutoCommitLogLimit + 1)
+    {
+        printf("[guest page] ... further commits not logged individually\n");
+    }
+
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
 // Turn "Segmentation fault" into something diagnosable.
 //
 // Without this all we learn is that the process died. What we actually need
@@ -169,21 +246,50 @@ LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
             const uint64_t guest = uint64_t(addr - g_guestBase);
             printf("that is GUEST address 0x%08" PRIX64 "\n", guest);
 
-            if (guest >= PPC_IMAGE_BASE + PPC_IMAGE_SIZE)
+            if (guest >= kFuncTableOffset && guest < kFuncTableOffset + kFuncTableSize)
                 printf("  -> inside the indirect-call table (a call through a\n"
                        "     function pointer we never populated)\n");
-            else if (guest < PPC_IMAGE_BASE)
-                printf("  -> below the image base: uncommitted low memory. Most\n"
-                       "     likely a null/garbage guest pointer being dereferenced.\n");
-            else
+            else if (guest >= PPC_IMAGE_BASE && guest < PPC_IMAGE_BASE + PPC_IMAGE_SIZE)
                 printf("  -> inside the loaded image\n");
+            else if (guest >= 0x80000000ull)
+                printf("  -> Xbox 360 physical-memory alias space. Normal for the\n"
+                       "     game to use; it faulted because nothing has been\n"
+                       "     committed there and auto-commit is off or capped.\n");
+            else
+                printf("  -> guest user address space. Most likely a null or\n"
+                       "     garbage pointer, since no allocator exists yet.\n");
+        }
+        else if (reinterpret_cast<uintptr_t>(addr) < 0x10000)
+        {
+            printf("that is a NULL-ish pointer.\n");
+            if (op == 8)
+                printf("  -> almost certainly a call through an empty slot in the\n"
+                       "     indirect-call table: the game branched to a guest\n"
+                       "     address the recompiler never emitted a function for.\n");
+            else
+                printf("  -> a null pointer dereference in host code.\n");
         }
         else
         {
+            // Note this only means host-side because the reservation now spans
+            // the full 32-bit guest range. It used to stop at ~2.06 GiB, which
+            // made an ordinary guest access to 0x93010000 look like a harness
+            // bug — a wrong verdict stated confidently.
             printf("that is OUTSIDE the guest reservation (%p .. %p)\n",
                 (void*)g_guestBase, (void*)(g_guestBase + g_guestSize));
-            printf("  -> host-side bug, not the recompiled game touching bad memory\n");
+            printf("  -> host-side bug: the reservation covers the entire 32-bit\n");
+            printf("     guest space, so this cannot be a guest access.\n");
         }
+    }
+
+    if (g_autoCommitCount.load() > 0)
+    {
+        printf("\nauto-committed %" PRIu64 " guest region(s), %" PRIu64 " MiB total\n",
+            g_autoCommitCount.load(), g_autoCommitBytes.load() >> 20);
+        if (g_autoCommitBytes.load() >= kAutoCommitCeiling)
+            printf("HIT THE %llu MiB CEILING — the game is probably scribbling\n"
+                   "over random addresses rather than allocating sensibly.\n",
+                (unsigned long long)(kAutoCommitCeiling >> 20));
     }
 
     wos::DumpImportLogUnsafe();
@@ -206,6 +312,9 @@ int main(int argc, char** argv)
     setvbuf(stdout, nullptr, _IONBF, 0);
 
 #ifdef _WIN32
+    g_autoCommit = (getenv("WOS_NO_AUTOCOMMIT") == nullptr);
+    // First in the chain, so it sees the fault before the unhandled filter.
+    AddVectoredExceptionHandler(1, GuestPageCommitter);
     SetUnhandledExceptionFilter(CrashReporter);
 #endif
 
@@ -214,7 +323,8 @@ int main(int argc, char** argv)
     printf("=== WoSRecomp harness ===\n");
     printf("image base 0x%llX  size 0x%llX\n", (unsigned long long)PPC_IMAGE_BASE, (unsigned long long)PPC_IMAGE_SIZE);
     printf("code  base 0x%llX  size 0x%llX\n", (unsigned long long)PPC_CODE_BASE, (unsigned long long)PPC_CODE_SIZE);
-    printf("guest reservation: %.2f GiB\n\n", double(kTotalSize) / (1024.0 * 1024.0 * 1024.0));
+    printf("guest reservation: %.2f GiB (mapped content ends at 0x%" PRIX64 ")\n\n",
+        double(kGuestReserve) / (1024.0 * 1024.0 * 1024.0), kTotalSize);
 
     const auto file = LoadFile(xexPath);
     if (file.empty())
@@ -240,7 +350,7 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
 
     g_guestBase = base;
-    g_guestSize = kTotalSize;
+    g_guestSize = kGuestReserve;
     printf("guest base: %p\n\n", (void*)base);
 
     // Every section's source pointer is `image.data.get() + VirtualAddress`,
@@ -270,7 +380,7 @@ int main(int argc, char** argv)
             (const void*)section.data,
             (section.flags & SectionFlags_Code) ? "CODE" : "");
 
-        if (section.base + section.size > kTotalSize)
+        if (section.base + section.size > kGuestReserve)
         {
             printf("SKIPPED: extends past the guest reservation\n");
             ++badSections;
