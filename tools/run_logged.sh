@@ -51,24 +51,31 @@ SUMMARY_FILE="$LOG_DIR/$STAMP-$LABEL.summary.md"
 
 echo "==> Running: $*"
 echo "==> Log: ${LOG_FILE#$REPO_ROOT/}"
+echo "    (output may appear in bursts — piping through tee makes stdio fully"
+echo "     buffered. If it looks stalled, check the log is growing:"
+echo "       ls -l ${LOG_FILE#$REPO_ROOT/}"
+echo "     or re-run the command without this wrapper to watch it live.)"
 echo
 
 START_EPOCH="$(date +%s)"
 # Capture combined stdout+stderr while still showing it live.
 # PIPESTATUS[0] preserves the command's real exit code past the tee pipe.
 #
-# Force line buffering where possible. C stdio switches from line-buffered to
-# fully buffered (~4 KB) when stdout is a pipe rather than a terminal, so a
-# quiet, long-running program piped into tee looks frozen — output only
-# appears once the buffer fills. That is indistinguishable from a hang and
-# has already cost one false alarm. stdbuf isn't present in every
-# environment (notably some Git Bash installs), so fall back cleanly.
+# C stdio switches from line-buffered to fully buffered (~4 KB) when stdout is
+# a pipe rather than a terminal, so a quiet program piped into tee can look
+# frozen — output only surfaces once the buffer fills. Indistinguishable from
+# a hang, and it has already caused one false alarm here.
+#
+# stdbuf helps ONLY for POSIX/MSYS binaries: it works by LD_PRELOAD, which a
+# native Windows .exe ignores entirely. So on Git Bash this is a no-op for
+# XenonRecomp.exe and friends, and the warning below is the honest state of
+# affairs rather than a fix.
+#
+# If you need to watch a quiet native Windows tool live, run it WITHOUT this
+# wrapper — straight to the console it will be line-buffered.
 if command -v stdbuf >/dev/null 2>&1; then
     stdbuf -oL -eL "$@" 2>&1 | tee "$LOG_FILE"
 else
-    echo "note: stdbuf not found — output may appear in bursts rather than" >&2
-    echo "      live. Progress is still being written to the log; check with" >&2
-    echo "      'ls -l ${LOG_FILE#$REPO_ROOT/}' if it looks stalled." >&2
     "$@" 2>&1 | tee "$LOG_FILE"
 fi
 EXIT_CODE="${PIPESTATUS[0]}"
