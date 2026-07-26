@@ -204,10 +204,13 @@ before `.pdata`, so overrides win.
 | `bso`/`bns` | `printConditionalBranch(false/true, "so")` — `PPCCRRegister` already has `.so` |
 | `bsolr` | `if (cr.so) return;` (mirrors `bltlr`/`bgtlr`) |
 
-**Verified:** the tool builds, and the C++ these emit was rendered and then
-compiled against the real `ppc_context.h` — field names, simde intrinsics
-and both `setFromMask` overloads all type-check. Not yet re-run against the
-game.
+**Verified against the game 2026-07-26:** recompile ran to 100% with
+**zero `Unrecognized instruction` lines** — all 265 sites across 15 opcodes
+now handled. Beforehand the emitted C++ was also rendered and compiled
+against the real `ppc_context.h`, confirming field names, simde intrinsics,
+brace escaping and both `setFromMask` overloads type-check.
+
+Remaining diagnostics in that run are the 33 known switch sites only.
 
 ## Second recompile — 2026-07-26 (after boundary overrides)
 

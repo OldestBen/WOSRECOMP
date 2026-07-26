@@ -165,9 +165,13 @@ check_patch_drift() {
     [ -d "$dir" ] || return 0
     compgen -G "$dir"/*.patch >/dev/null || return 0
 
+    # Compare with CR stripped. `git diff` emits LF, but a .patch checked out
+    # on Windows may be CRLF, which would otherwise read as drift that isn't
+    # there. .gitattributes marks *.patch as -text to prevent that at source;
+    # this handles trees checked out before that existed.
     local expected actual
-    expected="$(cat "$dir"/*.patch)"
-    actual="$(git -C "$repo" diff HEAD 2>/dev/null || true)"
+    expected="$(cat "$dir"/*.patch | tr -d '\r')"
+    actual="$(git -C "$repo" diff HEAD 2>/dev/null | tr -d '\r' || true)"
 
     if [ "$expected" != "$actual" ]; then
         echo >&2

@@ -39,11 +39,11 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - **Config:** complete and verified — 8 register save/restore addresses
   (cross-validated by block size), 498 switch tables, 106 function boundary
   overrides.
-- **Recompile:** runs to **100%, exit 0**. Switch errors cut 2,123 -> 466
-  (123 -> 33 sites). 15 missing PPC opcodes implemented via
+- **Recompile:** runs to **100%**. Switch errors cut 2,123 -> 466 (123 -> 33
+  sites). 15 missing PPC opcodes implemented via
   `patches/XenonRecomp/0001-*.patch`, applied automatically by
-  `build_tools.sh`; emitted C++ verified to compile against
-  `ppc_context.h`, but **not yet re-run against the game**.
+  `build_tools.sh` — **confirmed on the game: zero `Unrecognized
+  instruction` lines**, down from 265.
 - **Known defects:** 33 switch sites still emit wrong control flow — a
   function/walk alignment problem, diagnosed in the findings log, judged
   diminishing returns for now.

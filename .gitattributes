@@ -1,0 +1,10 @@
+# Patch files must keep LF endings on every platform.
+#
+# tools/build_tools.sh verifies that a submodule's working tree matches our
+# patches by comparing `git diff HEAD` (always LF) against the stored patch
+# bytes. If Git for Windows checks these out as CRLF, that comparison fails
+# and reports drift that doesn't exist. `-text` disables all EOL conversion.
+*.patch -text
+
+# Shell scripts are run under Git Bash on Windows; CRLF breaks the shebang.
+*.sh text eol=lf
