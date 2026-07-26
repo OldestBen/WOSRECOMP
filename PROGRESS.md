@@ -46,11 +46,16 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - **Game files:** Not yet in hand. User has extracted their disc into a local
   folder (`wos/`) on their own machine — not yet run through
   `import_dump.sh` or shared back into this session.
-- **Blocked on:** user running `tools/import_dump.sh` against their `wos/`
-  folder — now via `tools/docker/` (no Homebrew on their Mac; using Docker
-  Desktop instead) — and sharing the resulting tree + `xex_info` output →
-  address-hunting in the XEX (docs/02-config-guide.md) can't start until
-  then.
+- **Platform:** now on the **Windows workstation, native** (see
+  [`docs/06-windows-setup.md`](docs/06-windows-setup.md)). WSL2 was tried
+  first and abandoned — no outbound network from the distro (details in the
+  session log). Native Windows is the better destination anyway since the
+  eventual runtime must be a native Windows binary. **Nothing has been
+  built on Windows yet.**
+- **Blocked on:** user installing VS 2022 + Git for Windows, building the
+  toolchain, then running `tools/import_dump.sh` against their `wos` folder
+  and sharing the tree + `xex_info` output → address-hunting in the XEX
+  (docs/02-config-guide.md) can't start until then.
 - **Findings log:** `docs/05-findings-log.md` added as the durable place to
   record dump info/addresses (separate from this file — see note above).
   Still empty; nothing pasted in yet.

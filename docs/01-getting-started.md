@@ -18,6 +18,11 @@ Install Clang 18+ and CMake for your platform before continuing. On Ubuntu/Debia
 sudo apt install cmake clang-18 lld-18
 ```
 
+**On Windows:** see [`docs/06-windows-setup.md`](06-windows-setup.md) — the
+short version is Visual Studio 2022 ("Desktop development with C++" plus
+the Clang component) and Git for Windows, with bash launched from the VS
+developer prompt.
+
 On macOS via Homebrew: `brew install cmake ninja llvm@18 git`, then
 `export CC="$(brew --prefix llvm@18)/bin/clang" CXX="$(brew --prefix llvm@18)/bin/clang++"`
 (Apple's bundled `clang` won't work — different versioning/behavior).

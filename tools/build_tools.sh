@@ -4,17 +4,54 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-JOBS="${JOBS:-$(command -v nproc >/dev/null && nproc || echo 4)}"
 
+# Core count: nproc on Linux, NUMBER_OF_PROCESSORS on Windows/Git Bash
+# (which has no nproc), sysctl on macOS.
+detect_jobs() {
+    if command -v nproc >/dev/null 2>&1; then
+        nproc
+    elif [ -n "${NUMBER_OF_PROCESSORS:-}" ]; then
+        echo "$NUMBER_OF_PROCESSORS"
+    elif command -v sysctl >/dev/null 2>&1 && sysctl -n hw.ncpu >/dev/null 2>&1; then
+        sysctl -n hw.ncpu
+    else
+        echo 4
+    fi
+}
+JOBS="${JOBS:-$(detect_jobs)}"
+
+# Upstream names the binaries clang-18/clang++-18 on Debian/Ubuntu, but they
+# are plain clang/clang++ on Windows and macOS.
 CC_BIN="${CC:-clang-18}"
 CXX_BIN="${CXX:-clang++-18}"
 
 if ! command -v "$CC_BIN" >/dev/null 2>&1; then
-    echo "warning: '$CC_BIN' not found on PATH; falling back to 'clang'/'clang++'." >&2
-    echo "         XenonRecomp requires Clang 18+. Set CC/CXX env vars to override." >&2
     CC_BIN="clang"
     CXX_BIN="clang++"
 fi
+
+if ! command -v "$CXX_BIN" >/dev/null 2>&1; then
+    echo "error: no Clang found on PATH (tried clang++-18 and clang++)." >&2
+    echo "       XenonRecomp requires Clang 18+. Install it, or set CC/CXX." >&2
+    exit 1
+fi
+
+# Verify the version, rather than silently building with whatever was found.
+# An old Clang produces confusing failures much later, so fail loudly here.
+CLANG_MAJOR="$("$CXX_BIN" --version 2>/dev/null \
+    | grep -oiE 'clang version [0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+
+if [ -z "$CLANG_MAJOR" ]; then
+    echo "warning: could not parse a version from '$CXX_BIN --version'." >&2
+    echo "         Proceeding, but XenonRecomp requires Clang 18+." >&2
+elif [ "$CLANG_MAJOR" -lt 18 ]; then
+    echo "error: '$CXX_BIN' is Clang $CLANG_MAJOR, but Clang 18+ is required." >&2
+    echo "       XenonRecomp relies on Clang-specific behaviour; older versions" >&2
+    echo "       fail in confusing ways. Install Clang 18+, or set CC/CXX to it." >&2
+    exit 1
+fi
+
+echo "==> Using $CXX_BIN (Clang ${CLANG_MAJOR:-unknown}), $JOBS parallel jobs"
 
 build_one() {
     local name="$1"
