@@ -60,11 +60,16 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
    the 265 unrecognized-instruction warnings are gone.
 2. ~~Compile the generated C++~~ **DONE** — 200 TUs, 192 MB lib, 27 s, no
    errors.
-3. **Make it run.** The next milestone is a minimal host that maps the PPC
-   address space, loads the image, initialises a `PPCContext`, and calls the
-   entry point (`0x82B15E38`) — then observes which kernel import it dies
-   on. That failure list *is* the runtime to-do list, derived from the game
-   rather than guessed.
+3. **Make it run.** Host harness now exists (`WoSRecomp/`, built by
+   `tools/build_host.sh`): reserves the ~2.06 GiB guest space, maps the XEX
+   sections, populates the indirect-call table, and calls the entry point
+   with a scratch stack. **Never run against the real game yet.**
+   - Get the import list first: `xex_info private/default.xex --imports`.
+     **Correction:** link errors do *not* reveal missing imports — every
+     recompiled function is a weak alias so nothing is undefined, and
+     XenonUtils rewrites import thunks to `nop/nop/nop/blr`, meaning
+     unimplemented imports return silently. The XEX import table is the
+     real source.
 4. Decide whether to revisit the 33 remaining switch sites — see the
    alignment analysis in the findings log. They compile, but are wrong at
    runtime, so they matter more once code actually executes.

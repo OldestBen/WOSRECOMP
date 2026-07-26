@@ -10,6 +10,7 @@
 #include <cstring>
 #include <vector>
 #include <map>
+#include <string>
 #include <algorithm>
 #include <file.h>
 #include <image.h>
@@ -579,6 +580,78 @@ static int fixSwitches(const Image& image, const char* switchTomlPath, const cha
     return EXIT_SUCCESS;
 }
 
+// ---------------------------------------------------------------------------
+// --imports: list the kernel/OS functions the game imports.
+//
+// This is the runtime to-do list, taken from the game rather than guessed.
+// XenonUtils resolves the XEX import table during Image::ParseImage and
+// inserts a named symbol (__imp__XamFoo, __imp__NtBar) for every import whose
+// ordinal it recognises, so they are simply the __imp__-prefixed symbols.
+//
+// Note it also overwrites each import thunk with nop/nop/nop/blr. That is why
+// the host links and runs without implementing any of these: an unimplemented
+// import returns immediately instead of failing. Convenient for bring-up,
+// but it means missing imports fail *silently* — the game will misbehave
+// rather than tell you what it needed.
+// ---------------------------------------------------------------------------
+static int listImports(const Image& image)
+{
+    std::vector<std::pair<std::string, uint32_t>> imports;
+    for (const auto& sym : image.symbols)
+    {
+        if (sym.name.rfind("__imp__", 0) == 0)
+            imports.emplace_back(sym.name, static_cast<uint32_t>(sym.address));
+    }
+
+    if (imports.empty())
+    {
+        printf("No recognised imports found.\n");
+        printf("Either the XEX has no import table, or none of its ordinals are\n");
+        printf("in XenonUtils' xam.xex / xboxkrnl.exe tables.\n");
+        return EXIT_SUCCESS;
+    }
+
+    std::sort(imports.begin(), imports.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Group by the prefix after __imp__, which maps closely to subsystem.
+    auto subsystem = [](const std::string& n) -> const char* {
+        const char* s = n.c_str() + 7;  // skip "__imp__"
+        if (strncmp(s, "Xam", 3) == 0)  return "Xam (system/UI)";
+        if (strncmp(s, "Xe", 2) == 0)   return "Xe (GPU)";
+        if (strncmp(s, "Nt", 2) == 0)   return "Nt (kernel objects)";
+        if (strncmp(s, "Rtl", 3) == 0)  return "Rtl (runtime library)";
+        if (strncmp(s, "Ke", 2) == 0)   return "Ke (kernel core)";
+        if (strncmp(s, "Ex", 2) == 0)   return "Ex (executive)";
+        if (strncmp(s, "Ob", 2) == 0)   return "Ob (object manager)";
+        if (strncmp(s, "Mm", 2) == 0)   return "Mm (memory manager)";
+        if (strncmp(s, "Vd", 2) == 0)   return "Vd (video driver)";
+        if (strncmp(s, "Io", 2) == 0)   return "Io (file I/O)";
+        if (strncmp(s, "XAudio", 6) == 0 || strncmp(s, "XMA", 3) == 0) return "Audio";
+        if (strncmp(s, "XNet", 4) == 0) return "XNet (networking)";
+        return "other";
+    };
+
+    std::map<std::string, std::vector<const std::pair<std::string, uint32_t>*>> groups;
+    for (const auto& imp : imports)
+        groups[subsystem(imp.first)].push_back(&imp);
+
+    printf("%zu imported function(s) across %zu subsystem(s).\n", imports.size(), groups.size());
+    printf("Each needs a host implementation to override the recompiled stub.\n\n");
+
+    for (const auto& [group, entries] : groups)
+    {
+        printf("--- %s (%zu) ---\n", group.c_str(), entries.size());
+        for (const auto* e : entries)
+            printf("    0x%08X  %s\n", e->second, e->first.c_str());
+        printf("\n");
+    }
+
+    printf("Implement these as strong definitions with the same names; the\n");
+    printf("recompiled versions are weak aliases, so yours win at link time.\n");
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2)
@@ -591,10 +664,13 @@ int main(int argc, char** argv)
         printf("                   that jump outside their detected function\n");
         printf("  --write-config   with --fix-switches, patch the functions block into\n");
         printf("                   the given config in place (keeps a .bak)\n");
+        printf("  --imports        list the kernel/OS functions the game imports —\n");
+        printf("                   i.e. what the runtime has to implement\n");
         return EXIT_SUCCESS;
     }
 
     bool wantHelpers = false;
+    bool wantImports = false;
     const char* switchToml = nullptr;
     const char* writeConfig = nullptr;
     for (int i = 2; i < argc; ++i)
@@ -602,6 +678,10 @@ int main(int argc, char** argv)
         if (std::strcmp(argv[i], "--helpers") == 0)
         {
             wantHelpers = true;
+        }
+        else if (std::strcmp(argv[i], "--imports") == 0)
+        {
+            wantImports = true;
         }
         else if (std::strcmp(argv[i], "--fix-switches") == 0)
         {
@@ -687,6 +767,9 @@ int main(int argc, char** argv)
         fprintf(stderr, "Failed to parse \"%s\": %s\n", argv[1], e.what());
         return EXIT_FAILURE;
     }
+
+    if (wantImports)
+        return listImports(image);
 
     if (switchToml != nullptr)
         return fixSwitches(image, switchToml, writeConfig);
