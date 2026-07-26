@@ -16,6 +16,9 @@
 #include <xex.h>
 #include <xbox.h>
 #include <byteswap.h>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <toml++/toml.hpp>
 #include <ppc.h>
 
@@ -204,6 +207,35 @@ static bool isTerminator(uint32_t insn)
     return false;
 }
 
+// Walk FORWARD from `from` to just past the next terminator, giving a real
+// function boundary.
+//
+// This matters more than it looks. recompiler.cpp walks the code section
+// linearly, advancing `base` by each known function's size and calling
+// Function::Analyze wherever no function starts. Function::Analyze begins at
+// size 0 and returns 0 if its block stack empties immediately — and the caller
+// then does `base += fn.size`, i.e. adds nothing. A single function whose end
+// lands mid-instruction-stream can therefore wedge the recompiler in an
+// infinite loop with no output at all.
+//
+// So a declared function must end where a function plausibly ends, not at an
+// arbitrary offset like "furthest switch target + 4".
+static uint32_t findFunctionEnd(const Image& image, uint32_t from, uint32_t ceiling)
+{
+    constexpr uint32_t kMaxScan = 0x8000;
+    const uint32_t limit = std::min(ceiling, from + kMaxScan);
+
+    for (uint32_t a = from; a < limit; a += 4)
+    {
+        uint32_t insn;
+        if (!readInsn(image, a, insn))
+            break;
+        if (isTerminator(insn))
+            return a + 4;   // end is just past the terminator
+    }
+    return 0;
+}
+
 // Walk backwards from `site` to the terminator of the preceding function, then
 // forward over any padding, to get the start of the function containing
 // `site`. `floorAddr` is a hard lower bound (end of the nearest preceding
@@ -262,7 +294,7 @@ static std::vector<PdataFunc> readPdata(const Image& image)
     return out;
 }
 
-static int fixSwitches(const Image& image, const char* switchTomlPath)
+static int fixSwitches(const Image& image, const char* switchTomlPath, const char* writeConfigPath)
 {
     const std::vector<PdataFunc> pdata = readPdata(image);
     if (pdata.empty())
@@ -375,7 +407,13 @@ static int fixSwitches(const Image& image, const char* switchTomlPath)
                 if (f.begin > site) { ceilingAddr = f.begin; break; }
             }
 
-            uint32_t end = std::max(maxTarget + 4u, site + 4u);
+            // End at a real function boundary, not at an arbitrary offset.
+            // Ending mid-stream makes recompiler.cpp's linear walk analyse
+            // garbage, which can yield a zero-size function and hang it.
+            uint32_t end = findFunctionEnd(image,
+                std::max(maxTarget + 4u, site + 4u), ceilingAddr);
+            if (end == 0)
+                end = ceilingAddr;   // no terminator found: stop at the next known function
             if (end > ceilingAddr)
                 end = ceilingAddr;   // never swallow a known function
 
@@ -401,6 +439,15 @@ static int fixSwitches(const Image& image, const char* switchTomlPath)
 
         if (!outside)
             continue;
+
+        // Snap to a real function boundary — see findFunctionEnd.
+        {
+            uint32_t ceilingAddr = UINT32_MAX;
+            for (const auto& f : pdata)
+                if (f.begin > site) { ceilingAddr = f.begin; break; }
+            const uint32_t snapped = findFunctionEnd(image, needEnd, ceilingAddr);
+            needEnd = snapped ? snapped : std::min(needEnd, ceilingAddr);
+        }
 
         ++offending;
         auto [it, inserted] = widened.emplace(fn->begin, needEnd);
@@ -469,6 +516,59 @@ static int fixSwitches(const Image& image, const char* switchTomlPath)
             absorbed ? "  WARNING: spans known record(s)" : "");
     }
     printf("]\n\n");
+    if (writeConfigPath != nullptr)
+    {
+        std::ifstream in(writeConfigPath, std::ios::binary);
+        if (!in)
+        {
+            fprintf(stderr, "Cannot open \"%s\" for reading.\n", writeConfigPath);
+            return EXIT_FAILURE;
+        }
+        std::stringstream ss;
+        ss << in.rdbuf();
+        std::string cfg = ss.str();
+        in.close();
+
+        const size_t start = cfg.find("functions = [");
+        if (start == std::string::npos)
+        {
+            fprintf(stderr, "No `functions = [` block found in \"%s\".\n", writeConfigPath);
+            return EXIT_FAILURE;
+        }
+        const size_t close = cfg.find(']', start);
+        if (close == std::string::npos)
+        {
+            fprintf(stderr, "Unterminated `functions = [` block in \"%s\".\n", writeConfigPath);
+            return EXIT_FAILURE;
+        }
+
+        std::string block = "functions = [\n";
+        for (const auto& [s2, e2] : merged)
+        {
+            char line[96];
+            snprintf(line, sizeof(line), "    { address = 0x%08X, size = 0x%X },\n", s2, e2 - s2);
+            block += line;
+        }
+        block += "]";
+
+        // Keep a backup before overwriting.
+        const std::string bak = std::string(writeConfigPath) + ".bak";
+        { std::ofstream b(bak, std::ios::binary); b << cfg; }
+
+        cfg.replace(start, close - start + 1, block);
+        std::ofstream out(writeConfigPath, std::ios::binary);
+        if (!out)
+        {
+            fprintf(stderr, "Cannot open \"%s\" for writing.\n", writeConfigPath);
+            return EXIT_FAILURE;
+        }
+        out << cfg;
+        out.close();
+
+        printf("Wrote %zu entries into %s (backup: %s)\n\n",
+            merged.size(), writeConfigPath, bak.c_str());
+    }
+
     printf("Each entry spans from the function's start to its furthest switch\n");
     printf("target. Starts inside .pdata come from the unwind record; starts in\n");
     printf("the gaps between records are recovered by scanning back to the\n");
@@ -489,11 +589,14 @@ int main(int argc, char** argv)
         printf("                   needed by WoS_config.toml (see docs/02-config-guide.md)\n");
         printf("  --fix-switches   derive `functions = [...]` overrides for switch cases\n");
         printf("                   that jump outside their detected function\n");
+        printf("  --write-config   with --fix-switches, patch the functions block into\n");
+        printf("                   the given config in place (keeps a .bak)\n");
         return EXIT_SUCCESS;
     }
 
     bool wantHelpers = false;
     const char* switchToml = nullptr;
+    const char* writeConfig = nullptr;
     for (int i = 2; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--helpers") == 0)
@@ -508,6 +611,15 @@ int main(int argc, char** argv)
                 return EXIT_FAILURE;
             }
             switchToml = argv[++i];
+        }
+        else if (std::strcmp(argv[i], "--write-config") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "--write-config requires a path to WoS_config.toml.\n");
+                return EXIT_FAILURE;
+            }
+            writeConfig = argv[++i];
         }
     }
 
@@ -577,7 +689,7 @@ int main(int argc, char** argv)
     }
 
     if (switchToml != nullptr)
-        return fixSwitches(image, switchToml);
+        return fixSwitches(image, switchToml, writeConfig);
 
     if (wantHelpers)
         return findHelpers(image);
