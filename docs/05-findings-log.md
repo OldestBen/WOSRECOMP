@@ -187,11 +187,27 @@ before `.pdata`, so overrides win.
 | `dcbst` | 1 | data cache block store — almost certainly a safe no-op |
 | `bsolr` | 1 | branch to LR if summary overflow |
 
-These need implementing in XenonRecomp's `recompiler.cpp` (upstream code we
-vendor). Mostly bounded, mechanical work: the branch forms (`bso`/`bns`/
-`bsolr`) are condition-register variants, `dcbst` is a cache hint that can be
-a no-op, `frsqrte` maps to a math intrinsic, and the vector ops map onto
-`simde`. **Not yet addressed.**
+**All 15 implemented 2026-07-26** in our vendored `recompiler.cpp`:
+
+| Opcode | Implementation |
+|---|---|
+| `vrfip`/`vrfip128` | `simde_mm_round_ps` with `TO_POS_INF` (mirrors existing `vrfin`/`vrfiz`) |
+| `vcmpgtsw` | `simde_mm_cmpgt_epi32`, record form sets `cr6` via `setFromMask(...,0xF)` |
+| `vcmpgtsh` | `simde_mm_cmpgt_epi16`; 8 lanes so the mask is `movemask_epi8` → `0xFFFF` |
+| `vsrh`/`vslh`/`vsrah` | per-lane over 8 halfwords, `& 0xF` shift count (mirrors word versions) |
+| `vspltish` | `simde_mm_set1_epi16` (mirrors `vspltisb`/`vspltisw`) |
+| `vsel128` | added to the existing `vsel` case — disasm table gives it the same `{VD,VA,VB,VC}` layout |
+| `vnor`/`vnor128` | OR then XOR with all-ones; simde has no NOR |
+| `vcfpuxws128` | per-lane clamp to `[0, 2^32-1]` then convert; simde has no unsigned float→int |
+| `frsqrte` | `1.0 / sqrt(x)` — exact beats the hardware's ~1/4096 estimate |
+| `dcbst` | no-op, alongside `dcbf` (cache maintenance is meaningless here) |
+| `bso`/`bns` | `printConditionalBranch(false/true, "so")` — `PPCCRRegister` already has `.so` |
+| `bsolr` | `if (cr.so) return;` (mirrors `bltlr`/`bgtlr`) |
+
+**Verified:** the tool builds, and the C++ these emit was rendered and then
+compiled against the real `ppc_context.h` — field names, simde intrinsics
+and both `setFromMask` overloads all type-check. Not yet re-run against the
+game.
 
 ## Second recompile — 2026-07-26 (after boundary overrides)
 

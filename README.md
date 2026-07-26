@@ -46,6 +46,7 @@ WOSRECOMP/
 │   ├── import_dump.sh      # ingests your extracted dump into private/
 │   ├── run_logged.sh       # runs a command, captures log + compact summary
 │   └── recompile.sh        # runs the analyse → recompile pipeline for WoS
+├── patches/                 # our changes to the vendored submodules (see its README)
 ├── WoSRecompLib/
 │   ├── config/
 │   │   └── WoS_config.toml  # THE config you hand-author (addresses, hooks, etc.)

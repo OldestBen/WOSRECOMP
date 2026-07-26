@@ -1,0 +1,183 @@
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index fa91527..39fe059 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -688,10 +688,22 @@ bool Recompiler::Recompile(
+         printConditionalBranch(false, "gt");
+         break;
+ 
++    case PPC_INST_BSO:
++        printConditionalBranch(false, "so");
++        break;
++
++    case PPC_INST_BNS:
++        printConditionalBranch(true, "so");
++        break;
++
+     case PPC_INST_BGTLR:
+         println("\tif ({}.gt) return;", cr(insn.operands[0]));
+         break;
+ 
++    case PPC_INST_BSOLR:
++        println("\tif ({}.so) return;", cr(insn.operands[0]));
++        break;
++
+     case PPC_INST_BL:
+         if (!config.skipLr)
+             println("\tctx.lr = 0x{:X};", base + 4);
+@@ -801,7 +813,8 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_DCBF:
+-        // no op
++    case PPC_INST_DCBST:
++        // no op — cache maintenance has no meaning for recompiled code
+         break;
+ 
+     case PPC_INST_DCBT:
+@@ -985,6 +998,13 @@ bool Recompiler::Recompile(
+         println("\t{}.f64 = float(1.0 / {}.f64);", f(insn.operands[0]), f(insn.operands[1]));
+         break;
+ 
++    case PPC_INST_FRSQRTE:
++        // Estimate instruction; computing it exactly is strictly more accurate
++        // than the hardware's ~1/4096 relative error, which is acceptable here.
++        printSetFlushMode(false);
++        println("\t{}.f64 = float(1.0 / sqrt({}.f64));", f(insn.operands[0]), f(insn.operands[1]));
++        break;
++
+     case PPC_INST_FRSP:
+         printSetFlushMode(false);
+         println("\t{}.f64 = double(float({}.f64));", f(insn.operands[0]), f(insn.operands[1]));
+@@ -1810,6 +1830,20 @@ bool Recompiler::Recompile(
+             println("simde_mm_cvtepi32_ps(simde_mm_load_si128((simde__m128i*){}.u32)));", v(insn.operands[1]));
+         }
+         break;
++
++    case PPC_INST_VCFPUXWS128:
++    {
++        // Convert float -> unsigned word with saturation, scaling by 2^UIMM.
++        // simde has no unsigned float->int convert, so clamp per element.
++        printSetFlushMode(true);
++        const double scale = ldexp(1.0, int32_t(insn.operands[2]));
++        for (size_t i = 0; i < 4; i++)
++        {
++            println("\t{{ const double _v = double({}.f32[{}]) * {:.1f};", v(insn.operands[1]), i, scale);
++            println("\t  {}.u32[{}] = _v <= 0.0 ? 0u : (_v >= 4294967295.0 ? 0xFFFFFFFFu : uint32_t(_v)); }}", v(insn.operands[0]), i);
++        }
++        break;
++    }
+     }
+ 
+     case PPC_INST_VCFUX:
+@@ -1855,6 +1889,19 @@ bool Recompiler::Recompile(
+             println("\t{}.setFromMask(simde_mm_load_ps({}.f32), 0xF);", cr(6), v(insn.operands[0]));
+         break;
+ 
++    case PPC_INST_VCMPGTSW:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epi32(simde_mm_load_si128((simde__m128i*){}.u32), simde_mm_load_si128((simde__m128i*){}.u32)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.setFromMask(simde_mm_load_ps({}.f32), 0xF);", cr(6), v(insn.operands[0]));
++        break;
++
++    case PPC_INST_VCMPGTSH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epi16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        // 8 halfword lanes: movemask_epi8 yields 16 bits, so "all true" is 0xFFFF.
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.setFromMask(simde_mm_load_si128((simde__m128i*){}.u8), 0xFFFF);", cr(6), v(insn.operands[0]));
++        break;
++
+     case PPC_INST_VCMPGEFP:
+     case PPC_INST_VCMPGEFP128:
+         printSetFlushMode(true);
+@@ -1977,6 +2024,19 @@ bool Recompiler::Recompile(
+ 
+         break;
+ 
++    case PPC_INST_VNOR:
++    case PPC_INST_VNOR128:
++        // ~(a | b): simde has no NOR, so OR then invert with an all-ones XOR.
++        print("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_xor_si128(", v(insn.operands[0]));
++
++        if (insn.operands[1] != insn.operands[2])
++            print("simde_mm_or_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8))", v(insn.operands[1]), v(insn.operands[2]));
++        else
++            print("simde_mm_load_si128((simde__m128i*){}.u8)", v(insn.operands[1]));
++
++        println(", simde_mm_set1_epi32(-1)));");
++        break;
++
+     case PPC_INST_VPERM:
+     case PPC_INST_VPERM128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_perm_epi8_(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]), v(insn.operands[3]));
+@@ -2066,6 +2126,12 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_ps({}.f32, simde_mm_round_ps(simde_mm_load_ps({}.f32), SIMDE_MM_FROUND_TO_NEAREST_INT | SIMDE_MM_FROUND_NO_EXC));", v(insn.operands[0]), v(insn.operands[1]));
+         break;
+ 
++    case PPC_INST_VRFIP:
++    case PPC_INST_VRFIP128:
++        printSetFlushMode(true);
++        println("\tsimde_mm_store_ps({}.f32, simde_mm_round_ps(simde_mm_load_ps({}.f32), SIMDE_MM_FROUND_TO_POS_INF | SIMDE_MM_FROUND_NO_EXC));", v(insn.operands[0]), v(insn.operands[1]));
++        break;
++
+     case PPC_INST_VRFIZ:
+     case PPC_INST_VRFIZ128:
+         printSetFlushMode(true);
+@@ -2088,6 +2154,7 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_VSEL:
++    case PPC_INST_VSEL128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_or_si128(simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8))));", v(insn.operands[0]), v(insn.operands[3]), v(insn.operands[1]), v(insn.operands[3]), v(insn.operands[2]));
+         break;
+ 
+@@ -2109,6 +2176,12 @@ bool Recompiler::Recompile(
+             println("\t{}.u32[{}] = {}.u32[{}] << ({}.u8[{}] & 0x1F);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i * 4);
+         break;
+ 
++    case PPC_INST_VSLH:
++        // TODO: vectorize, ensure endianness is correct
++        for (size_t i = 0; i < 8; i++)
++            println("\t{}.u16[{}] = {}.u16[{}] << ({}.u8[{}] & 0xF);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i * 2);
++        break;
++
+     case PPC_INST_VSPLTB:
+     {
+         // NOTE: accounting for full vector reversal here
+@@ -2130,6 +2203,10 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_set1_epi8(char(0x{:X})));", v(insn.operands[0]), insn.operands[1]);
+         break;
+ 
++    case PPC_INST_VSPLTISH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_set1_epi16(short(0x{:X})));", v(insn.operands[0]), insn.operands[1]);
++        break;
++
+     case PPC_INST_VSPLTISW:
+     case PPC_INST_VSPLTISW128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u32, simde_mm_set1_epi32(int(0x{:X})));", v(insn.operands[0]), insn.operands[1]);
+@@ -2156,6 +2233,12 @@ bool Recompiler::Recompile(
+             println("\t{}.s32[{}] = {}.s32[{}] >> ({}.u8[{}] & 0x1F);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i * 4);
+         break;
+ 
++    case PPC_INST_VSRAH:
++        // TODO: vectorize, ensure endianness is correct
++        for (size_t i = 0; i < 8; i++)
++            println("\t{}.s16[{}] = {}.s16[{}] >> ({}.u8[{}] & 0xF);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i * 2);
++        break;
++
+     case PPC_INST_VSRW:
+     case PPC_INST_VSRW128:
+         // TODO: vectorize, ensure endianness is correct
+@@ -2163,6 +2246,12 @@ bool Recompiler::Recompile(
+             println("\t{}.u32[{}] = {}.u32[{}] >> ({}.u8[{}] & 0x1F);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i * 4);
+         break;
+ 
++    case PPC_INST_VSRH:
++        // TODO: vectorize, ensure endianness is correct
++        for (size_t i = 0; i < 8; i++)
++            println("\t{}.u16[{}] = {}.u16[{}] >> ({}.u8[{}] & 0xF);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i * 2);
++        break;
++
+     case PPC_INST_VSUBFP:
+     case PPC_INST_VSUBFP128:
+         printSetFlushMode(true);

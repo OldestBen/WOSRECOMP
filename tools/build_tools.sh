@@ -108,6 +108,51 @@ if [ "$IS_WINDOWS" -eq 1 ] && [ "$(basename "$CC_BIN")" = "clang-cl" ]; then
     fi
 fi
 
+# --------------------------------------------------------------------------
+# Apply our patches to the vendored submodules.
+#
+# The submodules point at upstream repositories we cannot push to, so any
+# change we make inside them exists only in the local checkout and would be
+# lost on a fresh clone. Patches under patches/<Submodule>/*.patch are the
+# version-controlled source of truth; this applies them on every build.
+#
+# Idempotent: a patch that is already applied reverses cleanly, which is how
+# we detect it and skip. A patch that neither applies nor reverses means the
+# submodule has moved under us — that is a hard error, not something to
+# paper over, because silently building without our instruction
+# implementations would produce subtly wrong game code.
+# --------------------------------------------------------------------------
+apply_patches() {
+    local name="$1"
+    local repo="$SCRIPT_DIR/$name"
+    local dir="$REPO_ROOT/patches/$name"
+
+    [ -d "$dir" ] || return 0
+
+    local patch
+    for patch in "$dir"/*.patch; do
+        [ -e "$patch" ] || continue
+        local label="${patch##*/}"
+
+        if git -C "$repo" apply --reverse --check "$patch" >/dev/null 2>&1; then
+            echo "==> [$name] already patched: $label"
+        elif git -C "$repo" apply --check "$patch" >/dev/null 2>&1; then
+            git -C "$repo" apply "$patch"
+            echo "==> [$name] applied: $label"
+        else
+            echo "error: patch does not apply and is not already applied:" >&2
+            echo "       $patch" >&2
+            echo "       The submodule has probably moved. Refresh the patch against" >&2
+            echo "       the current submodule commit before building." >&2
+            exit 1
+        fi
+    done
+}
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+apply_patches "XenonRecomp"
+apply_patches "XenosRecomp"
+
 # Choose the generator once, up front. This previously attempted Ninja with
 # stderr suppressed and retried with the default generator on failure —
 # which hid the real CMake error and made every configure appear to run
