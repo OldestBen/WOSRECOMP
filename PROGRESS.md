@@ -54,10 +54,12 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 1. **Re-run the recompile** with the instruction patch applied and confirm
    the 265 unrecognized-instruction warnings are gone.
-2. **Compile the generated C++** — needs a CMake target for
-   `WoSRecompLib/ppc/`, which does not exist yet. This is the next real
-   milestone and the first test of the 32 GB RAM constraint noted above
-   (cap parallelism; don't default to `nproc`).
+2. **Compile the generated C++** — target now exists
+   (`WoSRecompLib/CMakeLists.txt`, driven by `tools/build_ppc.sh`). Verified
+   against synthetic generated sources; **not yet run on the real ~2.4M
+   instruction output**. That run is the next milestone and the first real
+   test of the 32 GB constraint — the script caps parallelism at ~1 job per
+   2 GiB (so -j15 on this machine, not -j32).
 3. Decide whether to revisit the 33 remaining switch sites — see the
    alignment analysis in the findings log before re-attempting.
 4. Locate `setjmp`/`longjmp` (look for `RtlUnwind` callers) if error-path
