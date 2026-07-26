@@ -31,9 +31,14 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - **Stage:** Scaffold + toolchain verified, dump-ingestion tooling built. No
   game-specific work started yet.
 - **Toolchain:** `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, `xex_info`, and
-  `extract-xiso` all build and run cleanly via `./tools/build_tools.sh`
-  (verified on Ubuntu 24.04, Clang 18.1.3, CMake 3.28, in the cloud sandbox —
-  not yet verified on the user's own machine/OS).
+  `extract-xiso` all build cleanly via `./tools/build_tools.sh` on **both**:
+  - Ubuntu 24.04 / Clang 18.1.3 / CMake 3.28 (cloud sandbox)
+  - **Windows / VS 2026 / clang-cl 22.1.3 / CMake 4.3.1 / Ninja 1.13.2 —
+    the user's own workstation, verified 2026-07-26, exit 0 in 22s.**
+    Required three fixes: select `clang-cl` over `clang`, pin `CMAKE_AR` to
+    `llvm-lib`, and wipe stale build trees on toolchain change. Only
+    remaining noise is `strerror` deprecation warnings from extract-xiso
+    (upstream 2003-era C; harmless).
 - **Dump ingestion:** `tools/import_dump.sh <path>` is ready — finds
   `default.xex`/`default.xexp` in a raw dump (flat or nested layouts, or a
   `.iso` via `extract-xiso`), copies into `private/`, and prints a
@@ -46,16 +51,14 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - **Game files:** Not yet in hand. User has extracted their disc into a local
   folder (`wos/`) on their own machine — not yet run through
   `import_dump.sh` or shared back into this session.
-- **Platform:** now on the **Windows workstation, native** (see
-  [`docs/06-windows-setup.md`](docs/06-windows-setup.md)). WSL2 was tried
-  first and abandoned — no outbound network from the distro (details in the
-  session log). Native Windows is the better destination anyway since the
-  eventual runtime must be a native Windows binary. **Nothing has been
-  built on Windows yet.**
-- **Blocked on:** user installing VS 2022 + Git for Windows, building the
-  toolchain, then running `tools/import_dump.sh` against their `wos` folder
+- **Platform:** **Windows workstation, native, toolchain building green.**
+  See [`docs/06-windows-setup.md`](docs/06-windows-setup.md). WSL2 was tried
+  first and abandoned (no outbound network from the distro; details in the
+  session log).
+- **Blocked on:** running `tools/import_dump.sh` against the `wos` folder
   and sharing the tree + `xex_info` output → address-hunting in the XEX
-  (docs/02-config-guide.md) can't start until then.
+  (docs/02-config-guide.md) starts there. **This is now the only thing
+  standing between us and real work.**
 - **Findings log:** `docs/05-findings-log.md` added as the durable place to
   record dump info/addresses (separate from this file — see note above).
   Still empty; nothing pasted in yet.
