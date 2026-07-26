@@ -9,12 +9,19 @@
 #  https://github.com/hedge-dev/XenonRecomp
 # ============================================================================
 
+# Paths resolve relative to THIS FILE'S directory — XenonRecomp does
+# `config.directoryPath + <path>`, where directoryPath is the config's own
+# folder. So "../../private/..." is <repo root>/private/...
+
 [main]
 file_path = "../../private/default.xex"
-# patch_file_path = "../../private/default.xexp"           # uncomment if you have a title update
-# patched_file_path = "../../private/default_patched.xex"  # uncomment if using patch_file_path
+# No title update: the disc dump contains no default.xexp, so these stay
+# commented and file_path points at the retail XEX directly. If a TU turns up
+# later, uncomment both — it may fix retail bugs we'd otherwise hand-patch.
+# patch_file_path = "../../private/default.xexp"
+# patched_file_path = "../../private/default_patched.xex"
 out_directory_path = "../ppc"
-switch_table_file_path = "WoS_switch_tables.toml"
+switch_table_file_path = "WoS_switch_tables.toml"   # 498 tables, from XenonAnalyse
 
 # ----------------------------------------------------------------------------
 # Optimization flags — leave everything false until you have a working build.
@@ -30,17 +37,28 @@ non_volatile_as_local = false
 
 # ----------------------------------------------------------------------------
 # Register save/restore helper functions (compiler-emitted, Xenon ABI).
-# REQUIRED. Find these by disassembling default.xex — see docs/02-config-guide.md
-# for how to identify them.
+# REQUIRED.
+#
+# Located 2026-07-26 with:
+#     tools/xex_info/build/xex_info private/default.xex --helpers
+#
+# All eight matched unambiguously, and their block sizes corroborate one
+# another exactly — each gap equals the theoretical instruction count:
+#   savegprlr_14 -> restgprlr_14 = 0x50  =  20 insns (18 std r14-r31 + std LR + blr)
+#   savefpr_14   -> restfpr_14   = 0x4C  =  19 insns (18 stfd f14-f31 + blr)
+#   savevmx_14   -> savevmx_64   = 0x94  =  37 insns (18 * (li+stvx) + blr)
+#   savevmx_64   -> restvmx_14   = 0x204 = 129 insns (64 * (li+stvx128) + blr)
+#   restvmx_14   -> restvmx_64   = 0x94  =  37 insns (mirrors the save side)
+# All lie within .text (0x822C0000 .. 0x82BDC9AC). See docs/05-findings-log.md.
 # ----------------------------------------------------------------------------
-restgprlr_14_address = 0x00000000  # TODO
-savegprlr_14_address = 0x00000000  # TODO
-restfpr_14_address   = 0x00000000  # TODO
-savefpr_14_address   = 0x00000000  # TODO
-restvmx_14_address   = 0x00000000  # TODO
-savevmx_14_address   = 0x00000000  # TODO
-restvmx_64_address   = 0x00000000  # TODO
-savevmx_64_address   = 0x00000000  # TODO
+restgprlr_14_address = 0x82B24710
+savegprlr_14_address = 0x82B246C0
+restfpr_14_address   = 0x82B24AEC
+savefpr_14_address   = 0x82B24AA0
+restvmx_14_address   = 0x82B25448
+savevmx_14_address   = 0x82B251B0
+restvmx_64_address   = 0x82B254DC
+savevmx_64_address   = 0x82B25244
 
 # ----------------------------------------------------------------------------
 # setjmp / longjmp — optional, but recommended once located.
@@ -51,6 +69,13 @@ savevmx_64_address   = 0x00000000  # TODO
 # ----------------------------------------------------------------------------
 # Explicit function boundary overrides.
 # Add entries here whenever the analyser mis-detects a function's start/size.
+# Expect this list to grow steadily during bring-up — that's normal iterative
+# work, not a sign something is wrong.
+#
+# NOTE: this XEX has .pdata at 0x8227F000 (size 0x3A7B0) — the exception-unwind
+# function table, roughly 29,900 records. That's effectively ground truth for
+# function boundaries and should be the first place to look when the analyser
+# and reality disagree. Not yet exploited.
 # ----------------------------------------------------------------------------
 functions = [
     # { address = 0x82XXXXXX, size = 0xNN },

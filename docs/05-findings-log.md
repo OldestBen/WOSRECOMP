@@ -75,8 +75,11 @@ fixtures.
 ### XenonAnalyse
 
 First run completed **cleanly with no output or errors**, writing
-`WoSRecompLib/config/WoS_switch_tables.toml`. Contents not yet reviewed —
-next step is checking how many switch tables it detected.
+`WoSRecompLib/config/WoS_switch_tables.toml`: **12,327 lines, 498 switch
+tables** detected across ~2.39M instructions. That density is plausible for
+a game this size and gives no reason to suspect the analyser struggled —
+though the real test is whether the recompile trips over control flow it
+got wrong.
 
 ### Notable non-executable files
 
@@ -96,28 +99,33 @@ engine" assessment in the odds discussion.
 
 ## Register save/restore function addresses
 
-Byte-pattern search targets are documented in
-[`docs/02-config-guide.md`](02-config-guide.md#register-saverestore-functions--required-wos-specific).
-Fill in as found; each row should also get written into
-`WoS_config.toml`.
+**Resolved 2026-07-26** via `xex_info --helpers`, which scans the decrypted
+image (the patterns don't exist in the raw XEX — it's encrypted and
+compressed). See [`docs/02-config-guide.md`](02-config-guide.md#register-saverestore-functions--required-wos-specific).
 
 | Field | Address | How found | Notes |
 |---|---|---|---|
-| `restgprlr_14_address` | TBD | | |
-| `savegprlr_14_address` | TBD | | |
-| `restfpr_14_address` | TBD | | |
-| `savefpr_14_address` | TBD | | |
-| `restvmx_14_address` | TBD | | |
-| `savevmx_14_address` | TBD | | |
-| `restvmx_64_address` | TBD | | |
-| `savevmx_64_address` | TBD | | |
+| `restgprlr_14_address` | `0x82B24710` | `xex_info --helpers` | block size 0x50 = 20 insns ✓ |
+| `savegprlr_14_address` | `0x82B246C0` | `xex_info --helpers` | 18 std r14-r31 + std LR + blr |
+| `restfpr_14_address` | `0x82B24AEC` | `xex_info --helpers` | block size 0x4C = 19 insns ✓ |
+| `savefpr_14_address` | `0x82B24AA0` | `xex_info --helpers` | 18 stfd f14-f31 + blr |
+| `restvmx_14_address` | `0x82B25448` | `xex_info --helpers` | block size 0x94 = 37 insns ✓ |
+| `savevmx_14_address` | `0x82B251B0` | `xex_info --helpers` | 18 * (li+stvx) + blr |
+| `restvmx_64_address` | `0x82B254DC` | `xex_info --helpers` | mirrors save side (0x94) ✓ |
+| `savevmx_64_address` | `0x82B25244` | `xex_info --helpers` | block 0x204 = 129 insns (64 regs) ✓ |
+
+**Confidence: high.** All eight matched unambiguously (single candidate
+each), all lie inside `.text`, and — the strong evidence — every inter-block
+gap equals the theoretical instruction count for what that helper must
+contain. A wrong address would not produce five independently consistent
+block sizes. Written into `WoS_config.toml`.
 
 ## setjmp / longjmp
 
 | Field | Address | How found |
 |---|---|---|
-| `longjmp_address` | TBD | |
-| `setjmp_address` | TBD | |
+| `longjmp_address` | **not located** | Optional. Look for calls to `RtlUnwind`; `setjmp` usually sits just after. Omitted from the config for the first pass — if the game uses them, the symptom is broken control flow on error/exception paths, not a recompile failure. |
+| `setjmp_address` | **not located** | as above |
 
 ## Explicit function boundary overrides
 
