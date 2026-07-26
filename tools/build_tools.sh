@@ -75,6 +75,37 @@ fi
 
 echo "==> Using $CXX_BIN (Clang ${CLANG_MAJOR:-unknown}), $JOBS parallel jobs"
 
+# When compiling with clang-cl, CMake emits the MSVC lib.exe-style archive
+# rule:
+#     <CMAKE_AR> /nologo /out:<TARGET> <OBJECTS>
+# but its CMAKE_AR autodetection can land on llvm-ar.exe, the GNU-style
+# archiver, which only understands '-'-prefixed flags and dies with:
+#     llvm-ar.exe: error: unknown option /
+# llvm-lib.exe is the lib.exe-compatible archiver and ships in the same
+# LLVM bin directory, so pin CMAKE_AR to it explicitly.
+TOOLCHAIN_ARGS=()
+if [ "$IS_WINDOWS" -eq 1 ] && [ "$(basename "$CC_BIN")" = "clang-cl" ]; then
+    _clang_cl="$(command -v clang-cl 2>/dev/null || true)"
+    if [ -n "$_clang_cl" ]; then
+        _llvm_bin="$(dirname "$_clang_cl")"
+        for _ar in "$_llvm_bin/llvm-lib.exe" "$_llvm_bin/llvm-lib"; do
+            [ -x "$_ar" ] || continue
+            # CMake wants a native path; cygpath -m yields C:/... form.
+            if command -v cygpath >/dev/null 2>&1; then
+                _ar="$(cygpath -m "$_ar")"
+            fi
+            TOOLCHAIN_ARGS+=(-DCMAKE_AR="$_ar")
+            echo "==> Archiver: $_ar"
+            break
+        done
+        if [ "${#TOOLCHAIN_ARGS[@]}" -eq 0 ]; then
+            echo "warning: clang-cl in use but llvm-lib not found next to it." >&2
+            echo "         If archiving fails with \"unknown option /\", pass" >&2
+            echo "         CMAKE_ARGS=\"-DCMAKE_AR=<path to llvm-lib.exe or lib.exe>\"." >&2
+        fi
+    fi
+fi
+
 # Choose the generator once, up front. This previously attempted Ninja with
 # stderr suppressed and retried with the default generator on failure —
 # which hid the real CMake error and made every configure appear to run
@@ -106,6 +137,7 @@ build_one() {
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DCMAKE_C_COMPILER="$CC_BIN" \
         -DCMAKE_CXX_COMPILER="$CXX_BIN" \
+        ${TOOLCHAIN_ARGS[@]+"${TOOLCHAIN_ARGS[@]}"} \
         ${CMAKE_EXTRA_ARGS[@]+"${CMAKE_EXTRA_ARGS[@]}"}
 
     echo "==> Building $name"

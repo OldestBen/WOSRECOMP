@@ -113,6 +113,48 @@ the policy rather than change compiler:
 CMAKE_ARGS="-DCMAKE_POLICY_DEFAULT_CMP0141=OLD" ./tools/build_tools.sh
 ```
 
+### The archiver has to match the driver too
+
+Choosing `clang-cl` isn't sufficient on its own. LLVM ships **two**
+archivers, and CMake's autodetection can pick the wrong one:
+
+| Binary | Flag style | Matches |
+|---|---|---|
+| `llvm-ar.exe` | GNU (`-rcs`) | `clang.exe` |
+| `llvm-lib.exe` | MSVC (`/nologo`, `/out:`) | `clang-cl.exe` |
+
+With clang-cl, CMake emits the MSVC archive rule:
+
+```
+<CMAKE_AR> /nologo /out:<TARGET> <OBJECTS>
+```
+
+If `CMAKE_AR` resolved to `llvm-ar.exe`, that fails immediately:
+
+```
+llvm-ar.exe: error: unknown option /
+```
+
+`build_tools.sh` now pins `CMAKE_AR` to the `llvm-lib.exe` sitting beside
+whichever `clang-cl` is on `PATH`, so this is handled. If your layout is
+unusual and it can't find one, it warns and you can point it manually:
+
+```bash
+CMAKE_ARGS="-DCMAKE_AR=C:/path/to/llvm-lib.exe" ./tools/build_tools.sh
+```
+
+### Harmless warnings you can ignore
+
+CMake 4.x emits deprecation warnings for vendored dependencies that declare
+`cmake_minimum_required` below 3.10 (xxHash and one of XenonRecomp's own
+subdirectories do):
+
+```
+CMake Deprecation Warning ... Compatibility with CMake < 3.10 will be removed
+```
+
+These are upstream's to fix and don't affect the build.
+
 ## 5. Paths in Git Bash
 
 Git Bash uses POSIX-style paths. A Windows path like:
