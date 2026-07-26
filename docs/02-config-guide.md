@@ -74,8 +74,28 @@ XenonRecomp needs each one's starting address to recompile calls to them
 correctly; per the upstream README, there's currently no auto-detection for
 this, so it's a manual lookup per game.
 
-**How to find them** — search `default.xex`'s disassembly for these leading
-instruction bytes (from the upstream README):
+**How to find them — just run this:**
+
+```bash
+tools/xex_info/build/xex_info private/default.xex --helpers
+```
+
+It scans the decrypted image's CODE sections for all eight and prints
+ready-to-paste TOML. **You can't byte-search `default.xex` directly** — a
+retail XEX is encrypted and compressed, so these patterns don't exist in
+the raw file bytes, only in the decrypted image that `Image::ParseImage`
+produces.
+
+To reduce false positives, each 4-byte signature is validated against the
+*following* instruction: these helpers save/restore r14..r31 in order, so
+instruction N+1 is the same opcode with the register incremented by 1 and
+the displacement by 8. All twelve byte patterns used were verified against
+the vendored PPC disassembler rather than trusted from documentation.
+
+If a helper reports `NOT FOUND`, that can be legitimate — a game only
+contains the helpers it actually uses. Omit missing entries from the config.
+
+The underlying signatures, for reference (from the upstream README):
 
 | Field | Function | Starts with | Byte pattern |
 |---|---|---|---|

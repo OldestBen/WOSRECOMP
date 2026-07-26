@@ -34,10 +34,49 @@ fixtures.
   Worth revisiting later — if a TU exists for WoS it may fix retail bugs.
 - **Layout:** flat XISO-style — `default.xex` at the dump root, no nested
   GOD-style content folders.
-- **`xex_info` output** (base address, entry point, section layout):
+- **`xex_info` output** (captured 2026-07-26):
   ```
-  (pending — not yet captured)
+  Base address: 0x82000000
+  Entry point:  0x82B15E38
+  Image size:   0x1000000
+  Sections (12):
+    name             base         size         flags
+    .rdata           0x82001000   0x27D4E8
+    .pdata           0x8227F000   0x3A7B0
+    BINKBSS          0x822BA000   0x2920
+    .text            0x822C0000   0x91C9AC     CODE
+    BINK             0x82BDD000   0xF2E4       CODE
+    .data            0x82BF0000   0x3951FC
+    .tls             0x82F86000   0x11
+    BINKDATA         0x82F87000   0x3D68
+    .XBMOVIE         0x82F8B000   0xC
+    .idata           0x82F90000   0x3FA
+    .XBLD            0x82FA0000   0xA0
+    .reloc           0x82FA1000   0xCCC80
   ```
+
+### What the layout tells us
+
+- **`.text` is 0x91C9AC = 9,554,860 bytes** ≈ **2.39 million PPC
+  instructions**. Large. Expect the generated C++ to be big and the
+  eventual compile to be the memory-hungry step flagged in `PROGRESS.md`.
+- **`BINK` is a second CODE section.** The Bink Video library (RAD Game
+  Tools) is statically linked into the executable, not just used for the
+  `.bik` files. It will be recompiled along with everything else, so the
+  runtime has to either satisfy or stub whatever it calls out to.
+- **`.pdata` is 0x3A7B0.** On Xbox 360 this is the exception-unwind
+  function table; at 8 bytes per record that's roughly **29,900 function
+  entries** — effectively a ready-made list of function boundaries.
+  Potentially very useful for cross-checking XenonAnalyse's detection and
+  for populating `functions = [...]` overrides. **Not yet exploited.**
+- Entry point `0x82B15E38` sits inside `.text`
+  (`0x822C0000`–`0x82BDC9AC`), as expected.
+
+### XenonAnalyse
+
+First run completed **cleanly with no output or errors**, writing
+`WoSRecompLib/config/WoS_switch_tables.toml`. Contents not yet reviewed —
+next step is checking how many switch tables it detected.
 
 ### Notable non-executable files
 
