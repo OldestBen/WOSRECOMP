@@ -17,6 +17,7 @@
 #include <xbox.h>
 #include <byteswap.h>
 #include <toml++/toml.hpp>
+#include <ppc.h>
 
 // ---------------------------------------------------------------------------
 // --helpers: locate the compiler-generated register save/restore functions
@@ -175,6 +176,66 @@ static int findHelpers(const Image& image)
 
 struct PdataFunc { uint32_t begin; uint32_t end; };
 
+// Read the big-endian instruction word at a virtual address, if mapped in a
+// CODE section.
+static bool readInsn(const Image& image, uint32_t addr, uint32_t& out)
+{
+    for (const auto& s : image.sections)
+    {
+        if (!(s.flags & SectionFlags_Code) || s.data == nullptr)
+            continue;
+        if (addr < s.base || addr + 4 > s.base + s.size)
+            continue;
+        uint32_t raw;
+        std::memcpy(&raw, s.data + (addr - s.base), 4);
+        out = ByteSwap(raw);
+        return true;
+    }
+    return false;
+}
+
+// Instructions that end a function: blr, bctr, and unconditional non-linking
+// branches. (bl/bctrl are calls, not terminators.)
+static bool isTerminator(uint32_t insn)
+{
+    if (insn == 0x4E800020) return true;   // blr
+    if (insn == 0x4E800420) return true;   // bctr
+    if (PPC_OP(insn) == 18 && !PPC_BL(insn)) return true;  // b / ba
+    return false;
+}
+
+// Walk backwards from `site` to the terminator of the preceding function, then
+// forward over any padding, to get the start of the function containing
+// `site`. `floorAddr` is a hard lower bound (end of the nearest preceding
+// .pdata record) so we never wander into a function we already know about.
+// Returns 0 if no plausible start is found.
+static uint32_t inferFunctionStart(const Image& image, uint32_t site, uint32_t floorAddr)
+{
+    constexpr uint32_t kMaxScan = 0x8000;  // 32 KiB back-scan cap
+    const uint32_t limit = std::max(floorAddr, site > kMaxScan ? site - kMaxScan : 0u);
+
+    for (uint32_t a = site - 4; a >= limit && a < site; a -= 4)
+    {
+        uint32_t insn;
+        if (!readInsn(image, a, insn))
+            return 0;
+
+        if (isTerminator(insn))
+        {
+            // Function starts after the terminator, skipping zero padding.
+            uint32_t start = a + 4;
+            uint32_t pad;
+            while (start < site && readInsn(image, start, pad) && pad == 0)
+                start += 4;
+            return start < site ? start : 0;
+        }
+    }
+
+    // Hit the floor without finding a terminator: if that floor is a known
+    // record boundary, the function almost certainly starts exactly there.
+    return (floorAddr != 0 && floorAddr < site) ? floorAddr : 0;
+}
+
 static std::vector<PdataFunc> readPdata(const Image& image)
 {
     std::vector<PdataFunc> out;
@@ -242,7 +303,7 @@ static int fixSwitches(const Image& image, const char* switchTomlPath)
 
     // fnStart -> required end address
     std::map<uint32_t, uint32_t> widened;
-    size_t offending = 0, unlocatable = 0;
+    size_t offending = 0, unlocatable = 0, inferred = 0, unresolved = 0;
 
     for (const auto& node : *switches)
     {
@@ -273,7 +334,55 @@ static int fixSwitches(const Image& image, const char* switchTomlPath)
         const PdataFunc* fn = containing(site);
         if (fn == nullptr)
         {
+            // No unwind record covers this site. .pdata does not describe
+            // every function — leaf functions that never unwind can be
+            // omitted — so these live in the gaps between records and are
+            // discovered by XenonRecomp's heuristic branch scan instead,
+            // which is what sizes them too small.
+            //
+            // Recover the real start by walking backwards from the switch to
+            // the previous function's terminator (blr / bctr / unconditional
+            // b), then skipping any padding. Clamp to the preceding .pdata
+            // record's end so an inferred function can never overlap a known
+            // one.
             ++unlocatable;
+
+            uint32_t maxTarget = 0;
+            for (uint32_t t : targets)
+                maxTarget = std::max(maxTarget, t);
+
+            // Lower bound: end of the nearest record finishing before `site`.
+            uint32_t floorAddr = 0;
+            for (const auto& f : pdata)
+            {
+                if (f.end <= site)
+                    floorAddr = std::max(floorAddr, f.end);
+                else if (f.begin > site)
+                    break;
+            }
+
+            const uint32_t start = inferFunctionStart(image, site, floorAddr);
+            if (start == 0)
+            {
+                ++unresolved;
+                continue;
+            }
+
+            // Don't run past the next known record.
+            uint32_t ceilingAddr = UINT32_MAX;
+            for (const auto& f : pdata)
+            {
+                if (f.begin > site) { ceilingAddr = f.begin; break; }
+            }
+
+            uint32_t end = std::max(maxTarget + 4u, site + 4u);
+            if (end > ceilingAddr)
+                end = ceilingAddr;   // never swallow a known function
+
+            ++inferred;
+            auto [it2, ins2] = widened.emplace(start, end);
+            if (!ins2)
+                it2->second = std::max(it2->second, end);
             continue;
         }
 
@@ -300,9 +409,11 @@ static int fixSwitches(const Image& image, const char* switchTomlPath)
     }
 
     printf("Switch sites whose cases escape their .pdata function: %zu\n", offending);
-    if (unlocatable > 0)
-        printf("Switch sites with no containing .pdata record:        %zu\n", unlocatable);
-    printf("Distinct functions needing widening:                   %zu\n\n", widened.size());
+    printf("Switch sites with no containing .pdata record:          %zu\n", unlocatable);
+    printf("  ...of those, function start inferred by disassembly:  %zu\n", inferred);
+    if (unresolved > 0)
+        printf("  ...unresolved (no terminator found, skipped):        %zu\n", unresolved);
+    printf("Distinct functions to declare:                          %zu\n\n", widened.size());
 
     if (widened.empty())
     {
@@ -326,10 +437,12 @@ static int fixSwitches(const Image& image, const char* switchTomlPath)
             start, end - start, origEnd - start, absorbed);
     }
     printf("]\n\n");
-    printf("These widen each function to reach its furthest switch target,\n");
-    printf("absorbing the .pdata records in between — i.e. treating the split\n");
-    printf("records as the single function they actually are. Re-run XenonRecomp\n");
-    printf("afterwards; config entries take priority over .pdata.\n");
+    printf("Each entry spans from the function's start to its furthest switch\n");
+    printf("target. Starts inside .pdata come from the unwind record; starts in\n");
+    printf("the gaps between records are recovered by scanning back to the\n");
+    printf("previous function's terminator, clamped so they can never overlap a\n");
+    printf("known record. Re-run XenonRecomp afterwards; config entries are\n");
+    printf("registered before .pdata, so these take priority.\n");
 
     return EXIT_SUCCESS;
 }

@@ -138,16 +138,34 @@ out, both expected at this stage.
 `ERROR: Switch case at <site> is trying to jump outside function: <target>`,
 across **123 distinct switch sites**.
 
-**Cause (established, not guessed):** `recompiler.cpp` registers one function
-per `.pdata` unwind record, sized `FunctionLength * 4`. A single logical
-function can be split across several consecutive `.pdata` records, so a
-switch jumping between the pieces looks out of bounds.
+**First hypothesis — WRONG, recorded so it isn't retried.** I assumed a
+logical function was split across several consecutive `.pdata` records, with
+switches jumping between the pieces. `--fix-switches` measured it directly:
 
-**Fix:** `functions = [...]` overrides that span the whole function.
-Automated by `xex_info --fix-switches`, which finds the `.pdata` record
-containing each switch site and widens it to reach the furthest case target,
-absorbing the intervening records. Config entries take priority over
-`.pdata` (they're registered first), so the override wins.
+```
+Loaded 29942 .pdata function records.
+Loaded 498 switch tables.
+Switch sites whose cases escape their .pdata function: 0
+Switch sites with no containing .pdata record:        112
+```
+
+**Zero** sites overflow their record. The split-function theory is dead.
+
+**Actual cause:** `.pdata` does not describe every function — 112 of 498
+switch sites sit in the *gaps between* records (leaf functions that never
+unwind don't need an entry). Those functions are therefore not registered
+from `.pdata` at all; XenonRecomp falls back to its heuristic branch scan
+(`recompiler.cpp`, scanning for `bl` targets and calling `Function::Analyze`),
+and that heuristic sizes them too small — so their switch targets land
+outside. 112 unmapped sites vs 123 erroring sites lines up closely.
+
+**Fix:** `functions = [...]` overrides. For sites inside a record, widen the
+record. For sites in a gap, recover the function start by disassembling
+backwards to the previous function's terminator (`blr` / `bctr` /
+unconditional `b`), skipping padding, clamped to the preceding record's end
+so an inferred function can never overlap a known one; the end is clamped to
+the next record's start for the same reason. Config entries are registered
+before `.pdata`, so overrides win.
 
 ### Class 2 — unrecognized instructions (265 sites, 15 distinct opcodes)
 
