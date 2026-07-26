@@ -20,12 +20,34 @@ detect_jobs() {
 }
 JOBS="${JOBS:-$(detect_jobs)}"
 
-# Upstream names the binaries clang-18/clang++-18 on Debian/Ubuntu, but they
-# are plain clang/clang++ on Windows and macOS.
-CC_BIN="${CC:-clang-18}"
-CXX_BIN="${CXX:-clang++-18}"
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
+    *)                    IS_WINDOWS=0 ;;
+esac
 
-if ! command -v "$CC_BIN" >/dev/null 2>&1; then
+# Compiler selection:
+#   - explicit CC/CXX always wins
+#   - on Windows prefer clang-cl (the MSVC-style driver). XenonRecomp's
+#     CMakeLists sets CMAKE_MSVC_RUNTIME_LIBRARY and, under CMP0141,
+#     CMAKE_MSVC_DEBUG_INFORMATION_FORMAT. Those are MSVC-ABI abstractions
+#     that the GNU-style clang.exe driver does not implement, so configuring
+#     with plain clang.exe fails with:
+#       MSVC_DEBUG_INFORMATION_FORMAT value 'ProgramDatabase' not known
+#     clang-cl is the same compiler with an MSVC-compatible driver, and is
+#     what this codebase expects on Windows.
+#   - clang-18/clang++-18 is the Debian/Ubuntu naming convention
+#   - plain clang/clang++ otherwise (macOS, other distros)
+if [ -n "${CC:-}" ] || [ -n "${CXX:-}" ]; then
+    CC_BIN="${CC:-${CXX:-clang}}"
+    CXX_BIN="${CXX:-${CC:-clang++}}"
+elif [ "$IS_WINDOWS" -eq 1 ] && command -v clang-cl >/dev/null 2>&1; then
+    # clang-cl drives both C and C++; CMake distinguishes by source language.
+    CC_BIN="clang-cl"
+    CXX_BIN="clang-cl"
+elif command -v clang-18 >/dev/null 2>&1; then
+    CC_BIN="clang-18"
+    CXX_BIN="clang++-18"
+else
     CC_BIN="clang"
     CXX_BIN="clang++"
 fi
@@ -53,6 +75,21 @@ fi
 
 echo "==> Using $CXX_BIN (Clang ${CLANG_MAJOR:-unknown}), $JOBS parallel jobs"
 
+# Choose the generator once, up front. This previously attempted Ninja with
+# stderr suppressed and retried with the default generator on failure —
+# which hid the real CMake error and made every configure appear to run
+# twice. Checking for ninja explicitly keeps the output honest.
+if command -v ninja >/dev/null 2>&1; then
+    GENERATOR_ARGS=(-G Ninja)
+else
+    GENERATOR_ARGS=()
+    echo "note: ninja not found; using CMake's default generator." >&2
+fi
+
+# Extra flags for every configure, e.g.
+#   CMAKE_ARGS="-DCMAKE_POLICY_DEFAULT_CMP0141=OLD" ./tools/build_tools.sh
+read -ra CMAKE_EXTRA_ARGS <<< "${CMAKE_ARGS:-}"
+
 build_one() {
     local name="$1"
     local src_dir="$SCRIPT_DIR/$name"
@@ -65,15 +102,11 @@ build_one() {
 
     echo "==> Configuring $name"
     cmake -S "$src_dir" -B "$build_dir" \
-        -G Ninja \
+        ${GENERATOR_ARGS[@]+"${GENERATOR_ARGS[@]}"} \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DCMAKE_C_COMPILER="$CC_BIN" \
         -DCMAKE_CXX_COMPILER="$CXX_BIN" \
-        2>/dev/null || \
-    cmake -S "$src_dir" -B "$build_dir" \
-        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DCMAKE_C_COMPILER="$CC_BIN" \
-        -DCMAKE_CXX_COMPILER="$CXX_BIN"
+        ${CMAKE_EXTRA_ARGS[@]+"${CMAKE_EXTRA_ARGS[@]}"}
 
     echo "==> Building $name"
     cmake --build "$build_dir" --config RelWithDebInfo -j "$JOBS"

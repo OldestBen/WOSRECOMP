@@ -71,11 +71,47 @@ git submodule update --init --recursive
 tools/run_logged.sh build -- ./tools/build_tools.sh
 ```
 
-`build_tools.sh` handles Windows specifics itself: it falls back from
-`clang++-18` (a Debian/Ubuntu naming convention) to plain `clang++`, reads
-core count from `NUMBER_OF_PROCESSORS` since Git Bash has no `nproc`, and
-refuses to build with Clang older than 18 rather than failing confusingly
-later.
+`build_tools.sh` handles Windows specifics itself: it selects **`clang-cl`**
+(see below), reads core count from `NUMBER_OF_PROCESSORS` since Git Bash has
+no `nproc`, and refuses to build with Clang older than 18 rather than
+failing confusingly later.
+
+### Why `clang-cl` and not `clang`
+
+Visual Studio ships the same Clang under two drivers, side by side:
+
+| Binary | Driver style | Use |
+|---|---|---|
+| `clang.exe` | GNU-like (`-Wall`, `-o`) | Unix-style builds |
+| `clang-cl.exe` | MSVC-like (`/W4`, `/Fo`) | MSVC-ABI builds |
+
+XenonRecomp's `CMakeLists.txt` sets `CMAKE_MSVC_RUNTIME_LIBRARY` and, under
+policy `CMP0141`, `CMAKE_MSVC_DEBUG_INFORMATION_FORMAT`. Those are MSVC-ABI
+abstractions that the GNU-style driver doesn't implement, so configuring
+with plain `clang.exe` dies at the compiler-check stage with:
+
+```
+MSVC_DEBUG_INFORMATION_FORMAT value 'ProgramDatabase' not known for this C compiler.
+CMake Error ... CMakeTestCCompiler.cmake:56 (try_compile):
+  Failed to generate test project build system.
+```
+
+`clang-cl` is the *same compiler* with an MSVC-compatible driver, so those
+settings apply cleanly. `build_tools.sh` now picks it automatically on
+Windows; you shouldn't have to do anything.
+
+If you ever need to override:
+
+```bash
+CC=clang-cl CXX=clang-cl ./tools/build_tools.sh
+```
+
+And if `clang-cl` itself ever causes trouble, the alternative is to disable
+the policy rather than change compiler:
+
+```bash
+CMAKE_ARGS="-DCMAKE_POLICY_DEFAULT_CMP0141=OLD" ./tools/build_tools.sh
+```
 
 ## 5. Paths in Git Bash
 
