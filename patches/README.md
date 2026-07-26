@@ -50,22 +50,25 @@ work-in-progress edit shouldn't block a build.
 
 **If you edit a submodule, refresh its patch before committing.**
 
-## Consequence: the submodule always looks "dirty"
+## The submodules are permanently modified, and git is told to ignore it
 
-After a build, `git status` will show:
+Every build applies these patches, so the submodule working trees are
+*always* modified. `.gitmodules` therefore sets `ignore = dirty` on each one,
+and `git status` stays quiet.
 
-```
-     m tools/XenonRecomp
-```
+That is deliberate. Reporting a permanent, intended modification as a change
+needing attention is a false alarm, and a status output that always shows
+something is one you stop reading.
 
-(`.gitmodules` sets `ignore = untracked` on each submodule so build output
-inside them stays out of `git status`; **tracked-content changes are still
-shown deliberately**, since that's where patch drift would surface.)
+**It does not weaken the safety net.** `ignore = dirty` only affects how the
+*parent* repo reports the submodule. The drift check above runs
+`git -C tools/<name> diff HEAD` *inside* the submodule, which the setting
+does not touch — verified by confirming a stray edit is still caught with
+`ignore = dirty` in place.
 
-That is expected and correct. **Do not commit the submodule pointer** — the
-tracked commit is still upstream's, and the patch is what carries our
-changes. Do not `git checkout` inside the submodule to "clean" it either;
-the next build simply re-applies.
+**Never commit the submodule pointer.** The tracked commit is upstream's;
+`patches/` carries our changes. Equally, don't `git checkout` inside a
+submodule to "clean" it — the next build just re-applies.
 
 ## Refreshing a patch after a submodule update
 

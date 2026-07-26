@@ -1,15 +1,21 @@
 [submodule "tools/XenonRecomp"]
 	path = tools/XenonRecomp
 	url = https://github.com/hedge-dev/XenonRecomp.git
-	# Build output lives inside the submodule; ignore it so `git status` stays
-	# readable. Tracked-content changes are deliberately still shown — this
-	# submodule carries our patches/ and we want any drift to be visible.
-	ignore = untracked
+	# This submodule is permanently modified: build_tools.sh applies
+	# patches/XenonRecomp/*.patch to it on every build, and that state must
+	# never be committed (the tracked commit stays upstream's). Reporting it
+	# as dirty forever is a false alarm that trains you to ignore git status.
+	#
+	# Safe to ignore because drift is caught by a dedicated check:
+	# build_tools.sh compares `git -C tools/XenonRecomp diff HEAD` against the
+	# patch files on every build. That runs inside the submodule and is
+	# unaffected by this setting.
+	ignore = dirty
 [submodule "tools/XenosRecomp"]
 	path = tools/XenosRecomp
 	url = https://github.com/hedge-dev/XenosRecomp.git
-	ignore = untracked
+	ignore = dirty
 [submodule "tools/extract-xiso"]
 	path = tools/extract-xiso
 	url = https://github.com/XboxDev/extract-xiso.git
-	ignore = untracked
+	ignore = dirty
