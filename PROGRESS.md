@@ -28,68 +28,42 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** Scaffold + toolchain verified, dump-ingestion tooling built. No
-  game-specific work started yet.
-- **Toolchain:** `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, `xex_info`, and
-  `extract-xiso` all build cleanly via `./tools/build_tools.sh` on **both**:
-  - Ubuntu 24.04 / Clang 18.1.3 / CMake 3.28 (cloud sandbox)
-  - **Windows / VS 2026 / clang-cl 22.1.3 / CMake 4.3.1 / Ninja 1.13.2 —
-    the user's own workstation, verified 2026-07-26, exit 0 in 22s.**
-    Required three fixes: select `clang-cl` over `clang`, pin `CMAKE_AR` to
-    `llvm-lib`, and wipe stale build trees on toolchain change. Only
-    remaining noise is `strerror` deprecation warnings from extract-xiso
-    (upstream 2003-era C; harmless).
-- **Dump ingestion:** `tools/import_dump.sh <path>` is ready — finds
-  `default.xex`/`default.xexp` in a raw dump (flat or nested layouts, or a
-  `.iso` via `extract-xiso`), copies into `private/`, and prints a
-  non-copyrighted summary (directory tree + `xex_info` output) for sharing.
-  Tested against synthetic fixtures; not yet run against a real WoS dump.
-- **Config:** `WoSRecompLib/config/WoS_config.toml` is still the placeholder
-  copied from XenonRecomp's Sonic Unleashed example — every address in it is
-  `0x00000000` or a Unleashed-specific value and **must** be replaced with
-  values found in WoS's own `default.xex`. Nothing has been recompiled yet.
-- **Game files:** Not yet in hand. User has extracted their disc into a local
-  folder (`wos/`) on their own machine — not yet run through
-  `import_dump.sh` or shared back into this session.
-- **Platform:** **Windows workstation, native, toolchain building green.**
-  See [`docs/06-windows-setup.md`](docs/06-windows-setup.md). WSL2 was tried
-  first and abandoned (no outbound network from the distro; details in the
-  session log).
-- **Blocked on:** running `tools/import_dump.sh` against the `wos` folder
-  and sharing the tree + `xex_info` output → address-hunting in the XEX
-  (docs/02-config-guide.md) starts there. **This is now the only thing
-  standing between us and real work.**
-- **Findings log:** `docs/05-findings-log.md` added as the durable place to
-  record dump info/addresses (separate from this file — see note above).
-  Still empty; nothing pasted in yet.
-- **User's machines:**
-  - *Primary (Windows workstation)* — Ryzen 9 9950X3D (16C/32T), RTX 5090,
-    **32 GB RAM**. Intended target for the heavy work. Disk capacity not
-    yet stated.
-  - *Currently available (Mac)* — no Homebrew, using `tools/docker/`
-    instead. Fine for ingest/analyse; not the machine for bulk compiles.
-  - **Forward-looking concern:** 32 GB is the likely constraint, not the
-    CPU. Compiling the generated PPC C++ is many parallel Clang jobs on
-    large TUs; a naive `-j32` on 32 GB can thrash or OOM. When a build for
-    `WoSRecompLib/ppc/` exists, cap parallelism (`-j12`–`-j16`) and tune
-    upward from measurements rather than defaulting to `nproc`. Not
-    actionable yet — `tools/build_tools.sh` only builds the toolchain
-    itself, which is small.
+- **Stage:** CPU recompilation working. Not yet compiled, no runtime.
+- **Toolchain:** builds clean on Windows (VS 2026, clang-cl 22.1.3, CMake
+  4.3.1) and Linux (Clang 18.1.3, CMake 3.28). Five tools:
+  `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, plus our `xex_info` and
+  vendored `extract-xiso`.
+- **Game data:** `private/default.xex` in place (14,528,512 bytes, no title
+  update). Base `0x82000000`, entry `0x82B15E38`, `.text` 0x91C9AC
+  (~2.39M instructions).
+- **Config:** complete and verified — 8 register save/restore addresses
+  (cross-validated by block size), 498 switch tables, 106 function boundary
+  overrides.
+- **Recompile:** runs to **100%, exit 0**. Switch errors cut 2,123 -> 466
+  (123 -> 33 sites). 15 missing PPC opcodes implemented via
+  `patches/XenonRecomp/0001-*.patch`, applied automatically by
+  `build_tools.sh`; emitted C++ verified to compile against
+  `ppc_context.h`, but **not yet re-run against the game**.
+- **Known defects:** 33 switch sites still emit wrong control flow — a
+  function/walk alignment problem, diagnosed in the findings log, judged
+  diminishing returns for now.
+- **Not started:** compiling the generated C++; the entire `WoSRecomp/`
+  runtime (GPU/APU/kernel/OS/UI); shader recompilation.
 
 ## Next Steps (in order)
 
-1. User runs `tools/import_dump.sh <path-to-wos-folder>` on macOS (Homebrew
-   `llvm@18`), pastes the resulting directory tree + `xex_info` output into
-   chat *and* into `docs/05-findings-log.md`, and notes region/edition
-   (NTSC-U retail vs. Platinum Hits vs. PAL vs. JP — these can differ in
-   binary layout).
-2. Run `XenonAnalyse` against it to produce the first switch-table TOML.
-3. Find the 8 register save/restore function addresses (byte-pattern search,
-   see `docs/02-config-guide.md`) and fill in `WoS_config.toml`.
-4. First `XenonRecomp` pass — expect errors, iterate on `functions =`
-   overrides and `invalid_instructions =` entries.
-5. Only after CPU code recompiles cleanly: start on the `WoSRecomp/` runtime
-   (kernel/OS shims first, then GPU via XenosRecomp, then APU/input/UI).
+1. **Re-run the recompile** with the instruction patch applied and confirm
+   the 265 unrecognized-instruction warnings are gone.
+2. **Compile the generated C++** — needs a CMake target for
+   `WoSRecompLib/ppc/`, which does not exist yet. This is the next real
+   milestone and the first test of the 32 GB RAM constraint noted above
+   (cap parallelism; don't default to `nproc`).
+3. Decide whether to revisit the 33 remaining switch sites — see the
+   alignment analysis in the findings log before re-attempting.
+4. Locate `setjmp`/`longjmp` (look for `RtlUnwind` callers) if error-path
+   control flow misbehaves.
+5. Only then: the `WoSRecomp/` runtime — kernel/OS shims first, then GPU via
+   XenosRecomp, then APU/input/UI.
 
 ---
 
