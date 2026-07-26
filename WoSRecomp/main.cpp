@@ -391,6 +391,32 @@ LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
 
 } // namespace
 
+// Declared in kernel/guest.h so kernel code can end a run deliberately.
+//
+// It must not throw or return: it is called from inside recompiled guest
+// frames, which have no exception handling and no idea how to unwind. Print
+// everything worth knowing, then stop the process where it stands.
+namespace wos
+{
+[[noreturn]] void FatalGuestStop(const char* reason)
+{
+    printf("\n=== STOPPED: %s ===\n", reason);
+
+#ifdef _WIN32
+    printf("\nRecompiled functions on the stack, innermost first:\n");
+    PrintGuestBacktrace();
+#endif
+
+    DumpImportLogUnsafe();
+    fflush(stdout);
+
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), 2);
+#endif
+    _Exit(2);
+}
+} // namespace wos
+
 int main(int argc, char** argv)
 {
     // Unbuffered, so the last line printed is genuinely the last line that

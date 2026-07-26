@@ -28,15 +28,18 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **The game boots far enough to call the kernel.** 15 imports
-  reached in real boot order, starting with `NtAllocateVirtualMemory` — the
-  list is in [`docs/05-findings-log.md`](docs/05-findings-log.md) and is the
-  runtime to-do list, in priority order. It then blows the stack in
-  unbounded recursion, almost certainly because every import stub returns
-  without setting `r3`, so callers read stale registers as results.
-- **Next concrete step:** implement imports 1–15 for real, starting with a
-  guest allocator behind `NtAllocateVirtualMemory`. Nothing downstream can
-  work without a heap.
+- **Stage:** **The kernel has started.** 15 imports reached in real boot
+  order; the recursion that killed the last run was traced to `KeBugCheck`
+  returning when it must not. First real implementations now exist in
+  `WoSRecomp/kernel/`: a guest allocator behind `NtAllocateVirtualMemory`,
+  TLS, critical sections, `RtlInitAnsiString`, and terminating panic paths.
+  **Not yet run.**
+- **Import overrides:** implementations live in `WoSRecomp/kernel/*.cpp` and
+  are listed in `kernel/kernel_overrides.h`, which compiles the matching
+  generated stub out. Verified by link test — each import is defined exactly
+  once, by the implementation where one exists and by the stub otherwise.
+  `imports_generated.cpp` must be regenerated for this to work; CMake fails
+  with an explanatory error if it is stale.
 - **Toolchain:** builds clean on Windows (VS 2026, clang-cl 22.1.3, CMake
   4.3.1) and Linux (Clang 18.1.3, CMake 3.28). Five tools:
   `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, plus our `xex_info` and
@@ -111,6 +114,44 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (7) — Recursion identified; first real kernel implementations
+
+- **The backtrace named the cycle immediately:** `sub_82B31A48 +0x1CE` ⇄
+  `sub_82B31B88 +0xBD`, repeating all the way down. dbghelp symbolisation
+  worked first time.
+- **The call counts settled the diagnosis without any guessing.** Per
+  iteration, exactly: 1× `KeGetCurrentProcessType`, 2× `KeBugCheck`, 6×
+  `RtlInitAnsiString`, 1× `RtlEnter/LeaveCriticalSection` — 57204/19068/9534
+  are exact integer multiples, so this is a deterministic loop, not chaos.
+  That shape is a **panic handler formatting a message**.
+- **Cause: `KeBugCheck` is `DECLSPEC_NORETURN` on hardware — it halts the
+  console.** Stubbed as an ordinary returning function, the panic handler
+  returns into the code that panicked, which panics again. ~19,000 nested
+  bugchecks and a runaway stack follow directly.
+- Added an **import override mechanism**: generated stubs are now wrapped in
+  `#ifndef WOS_IMPL_<name>`, and `kernel/kernel_overrides.h` lists what is
+  implemented for real. No regeneration needed per function, and forgetting
+  the `#define` fails loudly at link rather than silently doing the wrong
+  thing. Verified by a partial-link test: every import defined exactly once,
+  implementations displacing their stubs, stubs covering the rest.
+- First real kernel code in `WoSRecomp/kernel/`:
+  - `panic.cpp` — `KeBugCheck`, `KeBugCheckEx`, `HalReturnToFirmware` now
+    terminate, printing the bugcheck code (named where known), the guest
+    backtrace and the import trace.
+  - `memory.cpp` — bump allocator behind `NtAllocateVirtualMemory`, honouring
+    a requested base, respecting `MEM_LARGE_PAGES` alignment, committing at
+    the harness's 64 KiB granularity. `NtFreeVirtualMemory` accepts and
+    ignores.
+  - `thread.cpp` — TLS slots (global allocation, `thread_local` values) and
+    critical sections keyed by guest address using `std::recursive_mutex`,
+    so the guest's own structure layout never has to be matched. `std::map`
+    rather than `unordered_map` deliberately: a rehash would relocate a mutex
+    another thread is blocked on.
+  - `rtl.cpp` — `RtlInitAnsiString`, writing a real big-endian `ANSI_STRING`.
+- CMake now rejects a pre-override `imports_generated.cpp` with an
+  explanatory error instead of letting it produce a wall of duplicate-symbol
+  failures.
 
 ### 2026-07-26 (6) — 15 imports reached; runaway stack made self-reporting
 

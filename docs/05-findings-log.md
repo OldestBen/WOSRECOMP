@@ -623,6 +623,65 @@ The predicate is unit-tested against the regions from the real run:
 counted as stack; `0x81FB0000`, `0x81F00000`, `0x81E20000` are. It fires at
 32 commits; the real run reached 26 before dying.
 
+## The recursion: KeBugCheck must not return (2026-07-26)
+
+The symbolised backtrace named the cycle on its first outing:
+
+```
+  #8   __imp__sub_82B31A48 +0x176
+  #9   __imp__sub_82B31B88 +0xBD
+  #10  __imp__sub_82B31A48 +0x1CE
+  #11  __imp__sub_82B31B88 +0xBD      ... repeating to the bottom
+```
+
+Two mutually recursive functions. The call counts then identified *what* they
+are, with no guessing required:
+
+| Import | Calls | Per iteration |
+|---|---:|---:|
+| `RtlInitAnsiString` | 57,204 | **6.00** |
+| `KeBugCheck` | 19,068 | **2.00** |
+| `KeGetCurrentProcessType` | 9,534 | 1.00 |
+| `RtlEnterCriticalSection` | 9,539 | 1.00 |
+| `RtlLeaveCriticalSection` | 9,539 | 1.00 |
+
+Exact integer ratios — a deterministic loop, not corruption. Six string
+initialisations and two bugchecks per pass is a **panic handler formatting a
+message**.
+
+### Cause
+
+`KeBugCheck` is `DECLSPEC_NORETURN` on the Xbox 360: it halts the console.
+Our stub logged the call and returned, so the panic handler returned into the
+code that had just panicked, which panicked again — forever.
+
+The same applies to `HalReturnToFirmware` (reboot/return to dashboard), which
+the trace reached as import #2.
+
+### Why it was panicking at all
+
+`NtAllocateVirtualMemory` is import #1, called once, and returned nothing —
+the stub left `r3` holding whatever the caller had put there. With no heap,
+CRT startup fails, and the game bugchecks. Everything after that, including
+the reads of guest `0x00000014` and `0xFFFFFFFD`, is downstream of a failed
+first allocation.
+
+### The import override mechanism
+
+Generated stubs are now emitted as:
+
+```cpp
+#ifndef WOS_IMPL_KeBugCheck
+PPC_FUNC(__imp__KeBugCheck) { WOS_IMPORT_STUB("KeBugCheck"); }
+#endif
+```
+
+`WoSRecomp/kernel/kernel_overrides.h` lists what is implemented for real, so
+implementing a function does not require regenerating the stub file, and
+forgetting to list it fails at link time rather than silently keeping the
+stub. Verified by partial-link test: every import is defined exactly once,
+implementations displacing their stubs and stubs covering everything else.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*

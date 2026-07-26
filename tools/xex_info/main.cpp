@@ -696,18 +696,29 @@ static int emitStubs(const Image& image, const char* outPath)
         << "// shows the game's actual boot sequence rather than a static list.\n"
         << "//\n"
         << "// These are strong definitions and override the recompiler's weak aliases.\n"
-        << "// To implement one for real, remove it from this file (regenerate with the\n"
-        << "// name excluded) and define it properly in WoSRecomp/kernel/ or os/.\n"
+        << "//\n"
+        << "// To implement one for real: write it in WoSRecomp/kernel/ and add\n"
+        << "//     #define WOS_IMPL_<name> 1\n"
+        << "// to WoSRecomp/kernel/kernel_overrides.h. The matching stub below then\n"
+        << "// compiles out, so the two never collide and this file does not need\n"
+        << "// regenerating every time a function gets implemented.\n"
         << "\n"
         << "#include \"ppc_recomp_shared.h\"\n"
         << "#include \"import_log.h\"\n"
+        << "#include \"kernel_overrides.h\"\n"
         << "\n";
 
     for (size_t i = 0; i < names.size(); ++i)
     {
-        out << "PPC_FUNC(" << names[i] << ") {\n"
-            << "    WOS_IMPORT_STUB(\"" << names[i].substr(7) << "\");\n"
-            << "}\n";
+        // names[i] is "__imp__Foo"; the bare name is what the override guard
+        // and the trace both use.
+        const std::string bare = names[i].substr(7);
+
+        out << "#ifndef WOS_IMPL_" << bare << "\n"
+            << "PPC_FUNC(" << names[i] << ") {\n"
+            << "    WOS_IMPORT_STUB(\"" << bare << "\");\n"
+            << "}\n"
+            << "#endif\n";
     }
 
     out << "\nsize_t WoSImportStubCount() { return " << names.size() << "; }\n";
