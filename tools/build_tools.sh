@@ -149,9 +149,42 @@ apply_patches() {
     done
 }
 
+# Detect edits made directly inside a submodule on top of our patches.
+#
+# apply_patches only proves our patches are applied; it cannot tell whether
+# someone also hand-edited the submodule afterwards. Such an edit is invisible
+# to git in this repo and is lost on a fresh clone — exactly the failure the
+# patches/ mechanism exists to prevent. Our patch files are generated with
+# `git diff HEAD`, so if the working tree is precisely HEAD+patches then the
+# submodule's current `git diff HEAD` reproduces them byte for byte.
+check_patch_drift() {
+    local name="$1"
+    local repo="$SCRIPT_DIR/$name"
+    local dir="$REPO_ROOT/patches/$name"
+
+    [ -d "$dir" ] || return 0
+    compgen -G "$dir"/*.patch >/dev/null || return 0
+
+    local expected actual
+    expected="$(cat "$dir"/*.patch)"
+    actual="$(git -C "$repo" diff HEAD 2>/dev/null || true)"
+
+    if [ "$expected" != "$actual" ]; then
+        echo >&2
+        echo "warning: [$name] working tree differs from patches/$name/." >&2
+        echo "         Something was edited inside the submodule beyond our patches." >&2
+        echo "         Those edits are NOT tracked by this repo and will be lost on a" >&2
+        echo "         fresh clone. Fold them into the patch:" >&2
+        echo "           git -C tools/$name diff HEAD > patches/$name/0001-*.patch" >&2
+        echo >&2
+    fi
+}
+
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 apply_patches "XenonRecomp"
 apply_patches "XenosRecomp"
+check_patch_drift "XenonRecomp"
+check_patch_drift "XenosRecomp"
 
 # Choose the generator once, up front. This previously attempted Ninja with
 # stderr suppressed and retried with the default generator on failure —

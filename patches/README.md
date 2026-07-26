@@ -34,13 +34,33 @@ matches. That's deliberately fatal rather than a warning — quietly building
 without our instruction implementations would emit subtly wrong game code
 that fails much later and much less obviously.
 
+## Drift detection
+
+`apply_patches` only proves our patches *are* applied — it cannot tell
+whether someone also hand-edited the submodule afterwards. Such an edit is
+invisible to git in this repo and vanishes on a fresh clone, which is the
+exact failure this directory exists to prevent.
+
+So `build_tools.sh` also compares the submodule's live `git diff HEAD`
+against the concatenated patch files. They're generated the same way, so a
+tree that is precisely HEAD+patches reproduces them byte for byte. Any
+mismatch prints a warning naming the submodule and the command to fold the
+edit back in. It warns rather than fails, because a legitimate
+work-in-progress edit shouldn't block a build.
+
+**If you edit a submodule, refresh its patch before committing.**
+
 ## Consequence: the submodule always looks "dirty"
 
 After a build, `git status` will show:
 
 ```
-    modified:   tools/XenonRecomp (modified content)
+     m tools/XenonRecomp
 ```
+
+(`.gitmodules` sets `ignore = untracked` on each submodule so build output
+inside them stays out of `git status`; **tracked-content changes are still
+shown deliberately**, since that's where patch drift would surface.)
 
 That is expected and correct. **Do not commit the submodule pointer** — the
 tracked commit is still upstream's, and the patch is what carries our
