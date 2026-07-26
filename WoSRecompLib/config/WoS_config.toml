@@ -3,10 +3,9 @@
 # ============================================================================
 #  See docs/02-config-guide.md for a full field-by-field explanation.
 #
-#  Every 0x00000000 placeholder below MUST be replaced with a real address
-#  found in WoS's own default.xex. The structure/fields themselves come
-#  straight from the upstream XenonRecomp README:
-#  https://github.com/hedge-dev/XenonRecomp
+#  All required addresses are filled in and verified — see
+#  docs/05-findings-log.md for provenance. Field semantics come from the
+#  upstream XenonRecomp README: https://github.com/hedge-dev/XenonRecomp
 # ============================================================================
 
 # Paths resolve relative to THIS FILE'S directory — XenonRecomp does
@@ -72,13 +71,132 @@ savevmx_64_address   = 0x82B25244
 # Expect this list to grow steadily during bring-up — that's normal iterative
 # work, not a sign something is wrong.
 #
-# NOTE: this XEX has .pdata at 0x8227F000 (size 0x3A7B0) — the exception-unwind
-# function table, roughly 29,900 records. That's effectively ground truth for
-# function boundaries and should be the first place to look when the analyser
-# and reality disagree. Not yet exploited.
+# The 107 entries below were generated 2026-07-26 by:
+#     tools/xex_info/build/xex_info private/default.xex \
+#         --fix-switches WoSRecompLib/config/WoS_switch_tables.toml
+#
+# Why they're needed: .pdata (0x8227F000, 29,942 records) does NOT describe
+# every function — leaf functions that never unwind get no entry. 112 of the
+# 498 switch sites sit in the gaps between records, so XenonRecomp never
+# registers those functions from .pdata and falls back to a heuristic branch
+# scan that sizes them too small, putting their switch targets out of bounds.
+#
+# Each start was recovered by disassembling backwards to the previous
+# function's terminator, floored at the preceding .pdata record's end and
+# ceilinged at the next record's start so they can never overlap a known
+# function. 5 overlapping extents were merged (multiple switches in one
+# function separated by early returns), leaving 107.
+#
+# Regenerate with the command above if the switch tables change.
 # ----------------------------------------------------------------------------
 functions = [
-    # { address = 0x82XXXXXX, size = 0xNN },
+    { address = 0x822C0938, size = 0x198 },
+    { address = 0x822EF24C, size = 0xC0 },
+    { address = 0x822EFFB8, size = 0x58 },
+    { address = 0x822F0018, size = 0x68 },
+    { address = 0x822F00E8, size = 0x114 },
+    { address = 0x822F0AB4, size = 0x130 },
+    { address = 0x822F16B0, size = 0xF0 },
+    { address = 0x822F9C68, size = 0xF4 },
+    { address = 0x8236F108, size = 0x58 },
+    { address = 0x823E9BE0, size = 0xC8 },
+    { address = 0x823E9CB8, size = 0xB8 },
+    { address = 0x823EA27C, size = 0x7C },
+    { address = 0x823EA300, size = 0x15C },
+    { address = 0x823EA4E0, size = 0x74 },
+    { address = 0x823EA558, size = 0x148 },
+    { address = 0x823EA6A8, size = 0x74 },
+    { address = 0x823EB65C, size = 0xA0 },
+    { address = 0x823EC020, size = 0x54 },
+    { address = 0x823EC078, size = 0x54 },
+    { address = 0x823EC410, size = 0xB0 },
+    { address = 0x823EC4C0, size = 0xD4 },
+    { address = 0x823EC5A0, size = 0x68 },
+    { address = 0x823ED240, size = 0x54 },
+    { address = 0x823ED298, size = 0x5C },
+    { address = 0x823ED488, size = 0xD0 },
+    { address = 0x823ED570, size = 0x1BC },
+    { address = 0x823ED834, size = 0x70 },
+    { address = 0x823EF0C8, size = 0x64 },
+    { address = 0x823EF3A8, size = 0x5C },
+    { address = 0x823FA14C, size = 0x234 },
+    { address = 0x824A7D94, size = 0x350 },
+    { address = 0x824B3148, size = 0x70 },
+    { address = 0x82506688, size = 0xCC },
+    { address = 0x82518598, size = 0x1B0 },
+    { address = 0x82518C18, size = 0xBC },
+    { address = 0x82518CD8, size = 0xB0 },
+    { address = 0x82518D90, size = 0xA0 },
+    { address = 0x8251A404, size = 0x1DC },
+    { address = 0x8255284C, size = 0xB70 },
+    { address = 0x825B69E8, size = 0x84 },
+    { address = 0x825B6A70, size = 0x84 },
+    { address = 0x825B9508, size = 0x288 },
+    { address = 0x825BD450, size = 0x88 },
+    { address = 0x825BE290, size = 0x60 },
+    { address = 0x825BFB18, size = 0xA0 },
+    { address = 0x825C3540, size = 0xC0 },
+    { address = 0x825C5798, size = 0x1D4 },
+    { address = 0x825C7BB8, size = 0xA0 },
+    { address = 0x825C86C8, size = 0xB4 },
+    { address = 0x825C8A60, size = 0x8C },
+    { address = 0x825CB694, size = 0x80 },
+    { address = 0x825CBFEC, size = 0x68 },
+    { address = 0x825D70CC, size = 0x50 },
+    { address = 0x82641084, size = 0xC8 },
+    { address = 0x8266CEF4, size = 0x88 },
+    { address = 0x8266F468, size = 0x528 },
+    { address = 0x82670A28, size = 0x64 },
+    { address = 0x826A73E8, size = 0x90 },
+    { address = 0x826A7618, size = 0x344 },
+    { address = 0x826BED84, size = 0x15C },
+    { address = 0x826CC588, size = 0x14C },
+    { address = 0x826CC798, size = 0x110 },
+    { address = 0x826F73E8, size = 0x5C },
+    { address = 0x82702CF0, size = 0x64 },
+    { address = 0x827389C0, size = 0xA4 },
+    { address = 0x8273B008, size = 0x74 },
+    { address = 0x8273B090, size = 0x58 },
+    { address = 0x8273B498, size = 0xAC },
+    { address = 0x8275BED8, size = 0xF0 },
+    { address = 0x8275BFD0, size = 0xDC },
+    { address = 0x8277B8E0, size = 0x70 },
+    { address = 0x82836FD0, size = 0xF0 },
+    { address = 0x828370C8, size = 0xDC },
+    { address = 0x82838110, size = 0x108 },
+    { address = 0x82838220, size = 0x100 },
+    { address = 0x828B662C, size = 0x80 },
+    { address = 0x828FC290, size = 0x21C },
+    { address = 0x829139CC, size = 0x78 },
+    { address = 0x8291D028, size = 0x530 },
+    { address = 0x829203D0, size = 0x64 },
+    { address = 0x82922C00, size = 0x298 },
+    { address = 0x82924180, size = 0x11C },
+    { address = 0x82925188, size = 0x98 },
+    { address = 0x82935DE8, size = 0x40 },
+    { address = 0x82935E30, size = 0x48 },
+    { address = 0x82935F60, size = 0x7C },
+    { address = 0x8293F380, size = 0x6C },
+    { address = 0x82941618, size = 0x90 },
+    { address = 0x82965550, size = 0xD8 },
+    { address = 0x82966A10, size = 0x90 },
+    { address = 0x82966AB0, size = 0x68 },
+    { address = 0x82980B58, size = 0x3D4 },
+    { address = 0x829CF190, size = 0x4C },
+    { address = 0x829CF210, size = 0x4C },
+    { address = 0x829CF260, size = 0x4C },
+    { address = 0x829E7128, size = 0x74 },
+    { address = 0x829E71A0, size = 0x74 },
+    { address = 0x829E7218, size = 0x90 },
+    { address = 0x829E7508, size = 0xCC },
+    { address = 0x829E75D8, size = 0x25C },
+    { address = 0x829E80F0, size = 0x154 },
+    { address = 0x82A4B7D8, size = 0x7C },
+    { address = 0x82A4CFC8, size = 0xC4 },
+    { address = 0x82A67C08, size = 0x270 },
+    { address = 0x82A8DA18, size = 0x174 },
+    { address = 0x82A92FE4, size = 0xA0 },
+    { address = 0x82A9E164, size = 0x44 },
 ]
 
 # ----------------------------------------------------------------------------
