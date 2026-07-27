@@ -432,6 +432,16 @@ LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
 // everything worth knowing, then stop the process where it stands.
 namespace wos
 {
+void PrintGuestStack(unsigned frames)
+{
+#ifdef _WIN32
+    PrintGuestBacktrace(frames);
+#else
+    (void)frames;
+    printf("  (no backtrace support on this platform)\n");
+#endif
+}
+
 [[noreturn]] void FatalGuestStop(const char* reason)
 {
     RestoreHostFpState();

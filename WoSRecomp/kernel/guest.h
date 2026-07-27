@@ -75,4 +75,9 @@ bool GuestCommit(uint8_t* base, uint32_t addr, uint32_t size);
 // recompiled frames that have no idea how to handle it.
 [[noreturn]] void FatalGuestStop(const char* reason);
 
+// Print the recompiled functions on the *calling* thread's stack. Implemented
+// in main.cpp via dbghelp. Safe to call from any guest thread — each one has
+// its own host stack, so this names whatever that thread is actually doing.
+void PrintGuestStack(unsigned frames);
+
 } // namespace wos

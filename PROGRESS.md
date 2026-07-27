@@ -36,8 +36,12 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
   is stable but *idle*. The wait statistics found why: `ev0` waited **25,517
   times, signalled 3 times** (the idle JQ worker pool), and the main thread's
   `KeWaitForSingleObject` targets an object we never saw created — a
-  **guest-embedded dispatcher object**, declared inline in the game's own
-  memory. Those are now adopted on first touch. **Not yet run.**
+  **guest-embedded dispatcher object** — now adopted on first touch, which
+  worked: `ev5`/`ev6` were adopted at the two graphics threads' `ctx+0x20`.
+  **Everything is now quiescent: every thread waits, nothing signals.** The
+  main thread is blocked forever on thread 4103's event. Long waits now print
+  the blocked thread's guest backtrace, to name the subsystem rather than
+  keep inferring it. **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -107,6 +111,35 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (17) — Adoption works; whole game is quiescent; backtrace the waiters
+
+- Adoption landed and the addresses were immediately meaningful:
+  ```
+  ev5 adopted at 0x4082FD7C   thread 4102 ctx 0x4082FD5C  -> ctx + 0x20
+  ev6 adopted at 0x4082FDCC   thread 4103 ctx 0x4082FDAC  -> ctx + 0x20
+  ```
+  Both are events embedded at **offset 0x20 inside the per-thread context
+  struct** of the two threads at entry `0x82ACECF0` — created right after the
+  ring buffer and `KiApcNormalRoutineNop`, so almost certainly graphics-side.
+- Current state, and it is a clean one to reason about: **everything waits,
+  nothing signals.**
+  | event | waits | timeouts | signals | who |
+  |---|---:|---:|---:|---|
+  | `ev0` | 25,576 | 25,511 | 3 | 5 JQ workers, idle |
+  | `ev5` | 3,167 | 3,166 | 0 | thread 4102, polling ~32/s |
+  | `ev6` | 3 | 2 | 0 | **main thread, blocked infinitely** |
+- The long-wait warning fired on `ev6` exactly as designed:
+  `still waiting on event 0x4082FDCC after 5s`.
+- **Stopped guessing.** Several stories fit (a GPU fence, an APC never
+  delivered — `KiApcNormalRoutineNop` is suggestive — a producer thread that
+  never starts), and picking one to implement speculatively is how the
+  earlier rounds would have gone wrong. Each guest thread runs on its own
+  host stack, so a `dbghelp` backtrace taken *inside* the wait names the
+  recompiled functions that led into it.
+- Long waits now print that backtrace. `PrintGuestStack` exposed from
+  `main.cpp` via `guest.h`; the existing symbolisation already works, as the
+  `KeBugCheck` backtrace proved.
 
 ### 2026-07-26 (16) — Wait statistics name the blocker: guest-embedded events
 
