@@ -154,6 +154,21 @@ std::string CleanName(const std::string& raw)
     return out.empty() ? "<unnamed>" : out;
 }
 
+// Put the FP control word back to something safe before reporting anything.
+//
+// Reporting does floating-point work — the import trace prints a percentage —
+// and we may well be *here* because FP exceptions are unmasked. That is not
+// hypothetical: the run that first got a working allocator died with
+// EXCEPTION_FLT_INEXACT_RESULT, and the reporter then printed the
+// "=== import trace ===" header and nothing after it, because the very next
+// thing it did was compute `100.0 * reached / total` and trap again.
+void RestoreHostFpState()
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    simde_mm_setcsr(0x1F80);   // round-to-nearest, every FP exception masked
+#endif
+}
+
 #ifdef _WIN32
 
 // Commit guest pages on first touch.
@@ -222,6 +237,7 @@ void PrintGuestBacktrace(unsigned frameCount = 40)
 // run that first reached 15 imports.
 [[noreturn]] void ReportRunawayStack(uint64_t guest)
 {
+    RestoreHostFpState();
     printf("\n=== RUNAWAY GUEST STACK ===\n");
     printf("The guest stack has grown past %llu MiB (now at 0x%08" PRIX64 ", started at 0x%08X).\n",
         (unsigned long long)(kStackRunawayLimit >> 20), guest, kStackTop);
@@ -306,6 +322,8 @@ LONG WINAPI GuestPageCommitter(EXCEPTION_POINTERS* info)
 // harness or in host code.
 LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
 {
+    RestoreHostFpState();
+
     const auto* rec = info->ExceptionRecord;
 
     const char* name = "unknown";
@@ -317,6 +335,16 @@ LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
     case EXCEPTION_STACK_OVERFLOW:        name = "stack overflow"; break;
     case EXCEPTION_PRIV_INSTRUCTION:      name = "privileged instruction"; break;
     case EXCEPTION_IN_PAGE_ERROR:         name = "in-page error"; break;
+    // Floating point. These mean the FP exception masks in MXCSR got cleared:
+    // the guest expects PowerPC semantics, where MSR[FE0,FE1] leave FP traps
+    // disabled and results are simply rounded.
+    case EXCEPTION_FLT_DENORMAL_OPERAND:  name = "FP denormal operand"; break;
+    case EXCEPTION_FLT_DIVIDE_BY_ZERO:    name = "FP divide by zero"; break;
+    case EXCEPTION_FLT_INEXACT_RESULT:    name = "FP inexact result"; break;
+    case EXCEPTION_FLT_INVALID_OPERATION: name = "FP invalid operation"; break;
+    case EXCEPTION_FLT_OVERFLOW:          name = "FP overflow"; break;
+    case EXCEPTION_FLT_STACK_CHECK:       name = "FP stack check"; break;
+    case EXCEPTION_FLT_UNDERFLOW:         name = "FP underflow"; break;
     default: break;
     }
 
@@ -400,6 +428,7 @@ namespace wos
 {
 [[noreturn]] void FatalGuestStop(const char* reason)
 {
+    RestoreHostFpState();
     printf("\n=== STOPPED: %s ===\n", reason);
 
 #ifdef _WIN32
@@ -613,6 +642,20 @@ int main(int argc, char** argv)
 
     PPCContext ctx{};
     ctx.r1.u64 = kStackTop;
+
+    // Seed the FP control word from the host's actual MXCSR.
+    //
+    // Without this, ctx.fpscr.csr starts at 0 (value-initialised), and the
+    // first enableFlushMode() does `csr |= FlushMask; setcsr(csr)` — writing
+    // MXCSR = 0x8040. Bits 7..12 are the exception *masks*, where 1 means
+    // masked, so that clears every one of them: the next inexact FP result
+    // raises EXCEPTION_FLT_INEXACT_RESULT (0xC000008F) instead of rounding.
+    //
+    // loadFromHost() copies the real MXCSR (0x1F80 by default, all masked),
+    // so enabling flush mode yields 0x9FC0 — masks preserved, FTZ and DAZ
+    // set, which is what the guest actually wants. PowerPC has FP traps
+    // disabled by default via MSR[FE0,FE1], so the game never expects them.
+    ctx.fpscr.loadFromHost();
 
     printf("entry resolved to host %p\n", (void*)entry);
     printf("\nscratch stack at 0x%X (0x%X bytes)\n", kStackTop, kStackSize);

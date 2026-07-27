@@ -682,6 +682,60 @@ forgetting to list it fails at link time rather than silently keeping the
 stub. Verified by partial-link test: every import is defined exactly once,
 implementations displacing their stubs and stubs covering everything else.
 
+## The allocator works; FP exception masks were being cleared (2026-07-26)
+
+With `NtAllocateVirtualMemory` implemented, the bugcheck cascade vanished
+entirely — `KeBugCheck` and `HalReturnToFirmware` are no longer called at
+all, confirming both were downstream of the failed first allocation. The
+trace reordered and reached new ground:
+
+```
+[mem] alloc guest 0x40000000, 0x100000  bytes  (type 0x60002000 = MEM_RESERVE|LARGE_PAGES|16MB_PAGES)
+[mem] alloc guest 0x40000000, 0x10000   bytes  (type 0x60001000 = MEM_COMMIT, at the reserved base)
+[mem] alloc guest 0x40100000, 0x2010000 bytes  (type 0x00003000 = MEM_COMMIT|MEM_RESERVE)  ~32 MiB
+[mem] alloc guest 0x42110000, 0x40000   bytes
+...
+[import  12] MmQueryStatistics
+[import  13] MmAllocatePhysicalMemoryEx
+```
+
+The reserve-then-commit pair is the guest doing exactly what the flags say,
+and honouring a requested base handled it correctly by accident rather than
+design — worth revisiting when reserve and commit need to differ.
+
+### The new crash: EXCEPTION_FLT_INEXACT_RESULT (0xC000008F)
+
+`PPCContext ctx{}` value-initialises, so `ctx.fpscr.csr` starts at **0**. The
+first `enableFlushMode()` then does:
+
+```cpp
+csr |= FlushMask;   // 0 | 0x8040
+setcsr(csr);        // MXCSR = 0x8040
+```
+
+MXCSR bits 7–12 are the FP exception **masks**, where 1 means *masked*. The
+host default is `0x1F80` (all masked). Writing `0x8040` clears every one, so
+the next inexact result traps instead of rounding.
+
+| | MXCSR | Masks |
+|---|---|---|
+| Host default | `0x1F80` | all masked |
+| `0 \| FlushMask` (the bug) | `0x8040` | **all clear — every FP op can trap** |
+| `loadFromHost() \| FlushMask` | `0x9FC0` | all masked, FTZ+DAZ set |
+
+PowerPC leaves FP traps disabled via `MSR[FE0,FE1]`, so the game never
+expects them. Fixed by calling `ctx.fpscr.loadFromHost()` before entering the
+guest, which seeds `csr` from the real MXCSR. Verified by direct test.
+
+### Why the crash report was empty
+
+The reporter printed `=== import trace ===` and then nothing. `DumpImportLog`
+computes `100.0 * reached / total` for the percentage — floating point, with
+the masks still cleared, so it trapped *again* inside the crash handler.
+
+All three reporting paths now call `RestoreHostFpState()` first. A diagnostic
+that can be killed by the condition it is diagnosing is not a diagnostic.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*

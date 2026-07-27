@@ -28,12 +28,13 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **The kernel has started.** 15 imports reached in real boot
-  order; the recursion that killed the last run was traced to `KeBugCheck`
-  returning when it must not. First real implementations now exist in
-  `WoSRecomp/kernel/`: a guest allocator behind `NtAllocateVirtualMemory`,
-  TLS, critical sections, `RtlInitAnsiString`, and terminating panic paths.
-  **Not yet run.**
+- **Stage:** **The allocator works and the game no longer panics.**
+  `KeBugCheck` and `HalReturnToFirmware` are not called at all any more —
+  both were downstream of a failed first allocation. The game now allocates
+  ~33 MiB across four calls and reaches `MmQueryStatistics` /
+  `MmAllocatePhysicalMemoryEx`. Last stop was `EXCEPTION_FLT_INEXACT_RESULT`,
+  caused by the harness leaving the MXCSR exception masks cleared; fixed by
+  seeding `ctx.fpscr` from the host. **Fix not yet run.**
 - **Import overrides:** implementations live in `WoSRecomp/kernel/*.cpp` and
   are listed in `kernel/kernel_overrides.h`, which compiles the matching
   generated stub out. Verified by link test — each import is defined exactly
@@ -114,6 +115,39 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (8) — Allocator works, panic gone; FP exception masks fixed
+
+- **The kernel implementations paid off immediately.** `KeBugCheck` and
+  `HalReturnToFirmware` are no longer called *at all* — both were purely
+  downstream of the failed first allocation, which confirms the previous
+  entry's diagnosis outright rather than by inference.
+- The game now allocates and keeps going: 1 MiB reserve then a 64 KiB commit
+  at the reserved base (`MEM_RESERVE` `0x60002000` then `MEM_COMMIT`
+  `0x60001000`), a ~32 MiB block, then 256 KiB — and reaches
+  `MmQueryStatistics` and `MmAllocatePhysicalMemoryEx`, two imports never
+  seen before.
+- **Note the reserve/commit pair works by accident.** `NtAllocateVirtualMemory`
+  honours a requested base, so the commit landed on the reserved address
+  correctly, but the allocator does not actually distinguish the two. That
+  needs fixing before the guest does anything more sophisticated.
+- **New stop: `EXCEPTION_FLT_INEXACT_RESULT` (0xC000008F).** `PPCContext ctx{}`
+  value-initialises `fpscr.csr` to 0, so the first `enableFlushMode()` writes
+  MXCSR = `0 | FlushMask` = `0x8040`. Bits 7–12 are the FP exception *masks*
+  (1 = masked), so that clears every one and the next inexact result traps.
+  The host default is `0x1F80`. Fixed with `ctx.fpscr.loadFromHost()` before
+  entering the guest, giving `0x9FC0` — masks preserved, FTZ+DAZ set. PowerPC
+  disables FP traps via `MSR[FE0,FE1]`, so the game never expects them.
+- **The crash reporter was killed by the thing it was reporting.** It printed
+  `=== import trace ===` and stopped, because `DumpImportLog` computes
+  `100.0 * reached / total` — floating point, masks still cleared, trap again
+  inside the handler. All three reporting paths now call
+  `RestoreHostFpState()` first. Also added the seven FP exception codes to
+  the reporter's name table, so `0xC000008F` reads as "FP inexact result"
+  rather than "unknown".
+- Verified by direct test rather than argument: zero-init `| FlushMask` gives
+  `0x8040` with masks clear; `loadFromHost() | FlushMask` gives `0x9FC0` with
+  all six masked and FTZ+DAZ set.
 
 ### 2026-07-26 (7) — Recursion identified; first real kernel implementations
 
