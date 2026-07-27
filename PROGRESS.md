@@ -39,9 +39,10 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
   **guest-embedded dispatcher object** — now adopted on first touch, which
   worked: `ev5`/`ev6` were adopted at the two graphics threads' `ctx+0x20`.
   **Everything is now quiescent: every thread waits, nothing signals.** The
-  main thread is blocked forever on thread 4103's event. Long waits now print
-  the blocked thread's guest backtrace, to name the subsystem rather than
-  keep inferring it. **Not yet run.**
+  blocked waiter is a *spawned* thread, not the main thread (backtrace
+  correction — see log). The main thread makes **no import calls at all** and
+  is therefore invisible; critical sections now detect and report a blocked
+  entry, which is where an invisible thread would be. **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -111,6 +112,42 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (18) — Backtrace corrects me; hunting the invisible main thread
+
+- **Correction to entry (17).** I said the long wait was the main thread. The
+  backtrace says otherwise:
+  ```
+  #2   __imp__sub_82ACECF0 +0x4CA
+  #3   GuestThreadMain +0x15D          <- our ExCreateThread trampoline
+  #4   std::thread::_Invoke<...>
+  ```
+  `GuestThreadMain` only appears on threads created through `ExCreateThread`;
+  the main thread would show `main` / `__scrt_common_main_seh`. So the
+  blocked waiter is one of the two `0x82ACECF0` threads, waiting on **its
+  own** `ctx+0x20` event. The inference was wrong; the measurement was right.
+  This is the second time today a confident claim about *who* was doing
+  something has been overturned by an actual backtrace.
+- **So where is the main thread?** It makes *no import calls whatsoever* —
+  every count in the heartbeat is attributable to thread 4102's polling loop
+  (`RtlEnterCriticalSection`, `RtlLeaveCriticalSection` and
+  `KeWaitForSingleObject` all ~158 per 5 s, in lockstep). A thread that calls
+  nothing is either spinning in pure guest code or blocked inside a host
+  primitive.
+- **The prime suspect is my own critical-section implementation.** A thread
+  blocked in `RtlEnterCriticalSection` makes no further import call while it
+  waits, so it is invisible to the heartbeat *by construction* — and a
+  `std::recursive_mutex::lock()` would hide a deadlock forever. If thread
+  4103 holds a section and then blocks on its event (which it does), any
+  other thread wanting that section is stuck silently.
+- Critical sections are now `std::recursive_timed_mutex` with a bounded
+  attempt: 5 seconds, then report the blocked thread, the section address,
+  **the guest thread that holds it**, and a backtrace — then carry on
+  waiting, because the report is the point rather than giving up.
+- Added `t_guestThreadId`, a thread-local set in the trampoline, so
+  diagnostics can say "main thread" or "guest thread 4103" rather than
+  leaving the reader to infer it. That inference is exactly what went wrong
+  above.
 
 ### 2026-07-26 (17) — Adoption works; whole game is quiescent; backtrace the waiters
 

@@ -22,7 +22,8 @@
 #include <map>
 #include <mutex>
 #include <thread>
-// (std::recursive_mutex lives in <mutex>)
+#include <chrono>
+// (std::recursive_timed_mutex lives in <mutex>)
 
 namespace wos
 {
@@ -76,6 +77,19 @@ namespace
 std::atomic<uint32_t> g_nextThreadId{0x1000};
 std::atomic<int> g_liveGuestThreads{0};
 
+// Identifies the calling guest thread in diagnostics. 0 means the main thread,
+// which never goes through ExCreateThread and so never sets this.
+thread_local uint32_t t_guestThreadId = 0;
+
+const char* ThreadLabel(char* buf, size_t n)
+{
+    if (t_guestThreadId == 0)
+        snprintf(buf, n, "main thread");
+    else
+        snprintf(buf, n, "guest thread %u", t_guestThreadId);
+    return buf;
+}
+
 // --- TLS ------------------------------------------------------------------
 //
 // Slot values are per-thread; the slot *allocation* is global. thread_local
@@ -89,15 +103,29 @@ thread_local uint32_t t_tlsValues[kMaxTlsSlots] = {};
 
 // --- Critical sections ----------------------------------------------------
 
-std::mutex g_csMapMutex;
-std::map<uint32_t, std::recursive_mutex> g_criticalSections;
+// Critical sections, with deadlock detection.
+//
+// WHY TIMED: a thread blocked here makes no import call while it waits, so it
+// is completely invisible to the heartbeat — which is exactly the state the
+// main thread is in. A plain lock() would hide a deadlock forever; a bounded
+// attempt turns it into a report naming both the blocked thread and the
+// holder.
+struct CriticalSection
+{
+    std::recursive_timed_mutex m;
+    std::atomic<uint32_t> owner{0};      // guest thread id, 0 = free
+    std::atomic<int> depth{0};
+};
 
-std::recursive_mutex& CriticalSectionFor(uint32_t guestAddr)
+std::mutex g_csMapMutex;
+// std::map never invalidates references to existing elements, which is why it
+// is used rather than unordered_map — a rehash would move a mutex out from
+// under a thread currently blocked on it.
+std::map<uint32_t, CriticalSection> g_criticalSections;
+
+CriticalSection& CriticalSectionFor(uint32_t guestAddr)
 {
     std::lock_guard<std::mutex> lock(g_csMapMutex);
-    // std::map never invalidates references to existing elements, which is why
-    // it is used here rather than unordered_map — a rehash would move the
-    // mutex out from under a thread that is currently blocked on it.
     return g_criticalSections[guestAddr];
 }
 
@@ -127,6 +155,7 @@ void GuestThreadMain(uint8_t* base, std::shared_ptr<wos::ThreadObject> self)
     printf("[thread] %u starting at guest 0x%08X (stack 0x%08X + 0x%X)\n",
         self->threadId, self->entryPoint, self->stackBase, self->stackSize);
 
+    t_guestThreadId = self->threadId;
     self->started = true;
     ++g_liveGuestThreads;
 
@@ -352,10 +381,26 @@ PPC_FUNC(__imp__RtlInitializeCriticalSectionAndSpinCount)
 PPC_FUNC(__imp__RtlEnterCriticalSection)
 {
     WOS_IMPORT_STUB("RtlEnterCriticalSection");
+
     // Recursive: the guest may enter the same section more than once on one
     // thread, which is legal for RTL_CRITICAL_SECTION and would deadlock a
     // plain mutex.
-    CriticalSectionFor(ctx.r3.u32).lock();
+    auto& cs = CriticalSectionFor(ctx.r3.u32);
+
+    if (!cs.m.try_lock_for(std::chrono::seconds(5)))
+    {
+        char label[32];
+        printf("[lock] %s: blocked entering critical section 0x%08X for 5s, "
+               "held by guest thread %u. Blocked in:\n",
+            ThreadLabel(label, sizeof(label)), ctx.r3.u32,
+            cs.owner.load(std::memory_order_relaxed));
+        wos::PrintGuestStack(14);
+
+        cs.m.lock();   // keep waiting; the report is the point, not giving up
+    }
+
+    cs.owner.store(t_guestThreadId, std::memory_order_relaxed);
+    cs.depth.fetch_add(1, std::memory_order_relaxed);
 }
 #endif
 
@@ -363,7 +408,11 @@ PPC_FUNC(__imp__RtlEnterCriticalSection)
 PPC_FUNC(__imp__RtlLeaveCriticalSection)
 {
     WOS_IMPORT_STUB("RtlLeaveCriticalSection");
-    CriticalSectionFor(ctx.r3.u32).unlock();
+
+    auto& cs = CriticalSectionFor(ctx.r3.u32);
+    if (cs.depth.fetch_sub(1, std::memory_order_relaxed) <= 1)
+        cs.owner.store(0, std::memory_order_relaxed);
+    cs.m.unlock();
 }
 #endif
 
