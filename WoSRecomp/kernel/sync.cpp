@@ -284,12 +284,25 @@ PPC_FUNC(__imp__ObReferenceObjectByHandle)
 {
     WOS_IMPORT_STUB("ObReferenceObjectByHandle");
 
+    const uint32_t handle = ctx.r3.u32;
     const uint32_t objectOut = ctx.r5.u32;
-    auto obj = wos::ObjectFromAny(ctx.r3.u32);
+    auto obj = wos::ObjectFromAny(handle);
+
+    // Create the backing object for a pseudo-handle on first reference. The
+    // guest asks for "the current thread" long before it would ever have a
+    // real handle for it, and it only wants something non-null to hold.
+    if (obj == nullptr &&
+        (handle == wos::kCurrentProcessHandle || handle == wos::kCurrentThreadHandle))
+    {
+        const uint32_t ptr = wos::RegisterPseudoHandle(base, handle,
+            handle == wos::kCurrentProcessHandle ? "process" : "thread");
+        if (ptr != 0)
+            obj = wos::ObjectFromGuestPtr(ptr);
+    }
 
     if (obj == nullptr)
     {
-        printf("[obj] ObReferenceObjectByHandle: unknown handle 0x%08X\n", ctx.r3.u32);
+        printf("[obj] ObReferenceObjectByHandle: unknown handle 0x%08X\n", handle);
         ctx.r3.u64 = wos::kStatusInvalidHandle;
         return;
     }

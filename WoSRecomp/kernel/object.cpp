@@ -13,6 +13,7 @@ namespace
 std::mutex g_mutex;
 std::unordered_map<uint32_t, std::shared_ptr<KernelObject>> g_byHandle;
 std::unordered_map<uint32_t, std::shared_ptr<KernelObject>> g_byGuestPtr;
+std::unordered_map<uint32_t, std::shared_ptr<KernelObject>> g_pseudo;
 
 // Xbox handles are small even values with a low tag; anything non-zero and
 // distinctive works. Starting well away from 0 means a handle can never be
@@ -63,9 +64,40 @@ std::shared_ptr<KernelObject> ObjectFromGuestPtr(uint32_t guestPtr)
 
 std::shared_ptr<KernelObject> ObjectFromAny(uint32_t handleOrPtr)
 {
+    // Pseudo-handles. NT (and the 360) use these constants to mean "me"
+    // without allocating anything: -1 is the current process, -2 the current
+    // thread. The last run logged "unknown handle 0xFFFFFFFE" twice because
+    // they were being looked up like ordinary handles and naturally not found.
+    if (handleOrPtr == kCurrentProcessHandle || handleOrPtr == kCurrentThreadHandle)
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_pseudo.find(handleOrPtr);
+        if (it != g_pseudo.end())
+            return it->second;
+        // Fall through: a caller that only wants a non-null object pointer is
+        // better served by one than by a failure.
+    }
+
     if (auto obj = ObjectFromHandle(handleOrPtr))
         return obj;
     return ObjectFromGuestPtr(handleOrPtr);
+}
+
+uint32_t RegisterPseudoHandle(uint8_t* base, uint32_t pseudoHandle, const char* type)
+{
+    auto obj = std::make_shared<KernelObject>();
+    obj->type = type;
+
+    const uint32_t guestPtr = GuestAlloc(base, 0, kObjectBlockSize, 0x1000);
+    if (guestPtr == 0)
+        return 0;
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    obj->handle = pseudoHandle;
+    obj->guestPtr = guestPtr;
+    g_pseudo[pseudoHandle] = obj;
+    g_byGuestPtr[guestPtr] = obj;
+    return guestPtr;
 }
 
 void CloseHandle(uint32_t handle)

@@ -39,8 +39,17 @@ uint32_t RegisterObject(uint8_t* base, const std::shared_ptr<KernelObject>& obj)
 std::shared_ptr<KernelObject> ObjectFromHandle(uint32_t handle);
 std::shared_ptr<KernelObject> ObjectFromGuestPtr(uint32_t guestPtr);
 
-// Accepts a handle *or* a guest pointer, because the guest mixes them freely.
+// Pseudo-handles: NT constants meaning "me", needing no allocation.
+constexpr uint32_t kCurrentProcessHandle = 0xFFFFFFFFu;
+constexpr uint32_t kCurrentThreadHandle  = 0xFFFFFFFEu;
+
+// Accepts a handle *or* a guest pointer *or* a pseudo-handle, because the
+// guest mixes all three freely.
 std::shared_ptr<KernelObject> ObjectFromAny(uint32_t handleOrPtr);
+
+// Give a pseudo-handle a real backing object so ObReferenceObjectByHandle can
+// return a usable pointer for it. Returns the guest pointer, or 0.
+uint32_t RegisterPseudoHandle(uint8_t* base, uint32_t pseudoHandle, const char* type);
 
 void CloseHandle(uint32_t handle);
 

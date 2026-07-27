@@ -28,13 +28,14 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **32 imports; the game reads its config file and names its
-  threads.** `game_shared.ini` read in full (45 bytes), and the thread pool
-  identifies itself: five `JQ worker N (CPU n)` plus a `Game Master`. Still
-  bugchecks at the same place on the main thread. Latest suspects — all
-  out-parameter stubs that wrote nothing, plus physical memory that always
-  returned NULL — are now implemented in `kernel/system.cpp`.
-  **Not yet run.**
+- **Stage:** **56 imports — the bugcheck is gone and the game is
+  initialising the GPU.** Physical memory now succeeds (three buffers of
+  4/4/16 MiB), and the trace runs through `VdInitializeEngines`,
+  `VdInitializeRingBuffer`, `VdSetGraphicsInterruptCallback`, EDRAM
+  training, and into `DbgPrint`. It then stops, waiting for a vertical-blank
+  interrupt that never arrives. A 60 Hz vblank thread, the `Vd*` video
+  driver, pseudo-handles and the game's own debug output are now
+  implemented. **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -104,6 +105,44 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (12) — Past the bugcheck; GPU init reached; vblank implemented
+
+- **The bugcheck is gone.** Physical memory and the filled-in statistics were
+  the blocker; with them the game runs straight past the abort it had hit in
+  every previous run and on to **56 imports**.
+- Physical allocations are unmistakably GPU buffers: `0x30000` x4, then
+  `0x50000` x2, then **4 MiB, 4 MiB and 16 MiB**. It also writes to
+  `0x7FC80000` — the Xbox 360 GPU register window.
+- The new imports are almost entirely graphics: `XGetVideoMode`,
+  `VdInitializeEngines`, `VdSetGraphicsInterruptCallback`,
+  `VdInitializeRingBuffer`, `VdEnableRingBufferRPtrWriteBack`,
+  `VdQueryVideoMode`, `VdQueryVideoFlags`, `VdRetrainEDRAM`,
+  `VdIsHSIOTrainingSucceeded`, plus `DbgPrint` and `_vsnprintf`.
+- **It then hangs**, and the reason is structural rather than a bug: the
+  console's graphics driver calls back into the title on every vertical
+  blank, and the render loop waits on that callback. With no GPU there is no
+  vblank, so the wait never ends.
+- `kernel/video.cpp` supplies the *shape* of a GPU without drawing anything:
+  a 720p widescreen progressive video mode, ring-buffer calls accepted, and
+  a **host thread standing in for the display's 60 Hz heartbeat**, invoking
+  the registered interrupt callback on its own guest stack. The ring
+  buffer's read-pointer writeback is kept at "fully caught up" for the same
+  reason — a frozen read pointer is another way to wait forever.
+- `kernel/debug.cpp` implements `DbgPrint`/`_vsnprintf`, so the engine can
+  tell us what it is doing in its own words. **Stated limitation:**
+  `_vsnprintf` copies the format string through without substituting
+  arguments. Walking a PowerPC va_list properly (eight GPR slots, then the
+  stack, with separate float registers) is fiddly enough that getting it
+  subtly wrong would produce plausible but false log messages — worse than
+  none. Literal messages come through perfectly; the rest arrive with their
+  `%s` and `%d` visible, which is unmistakably a limitation rather than a
+  lie.
+- **Pseudo-handles.** `ObReferenceObjectByHandle: unknown handle 0xFFFFFFFE`
+  appeared twice — that is NT's "current thread" constant (and `0xFFFFFFFF`
+  is "current process"), which need no allocation and were being looked up
+  as ordinary handles. Now backed on first reference.
+- Link-tested: 64 imports implemented, none defined twice.
 
 ### 2026-07-26 (11) — Config file read; physical memory and clocks implemented
 

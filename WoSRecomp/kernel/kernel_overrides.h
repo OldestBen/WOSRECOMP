@@ -113,3 +113,36 @@
 // Not an error path: 0x406D1388 is the SetThreadName convention, which is why
 // there was exactly one raise per thread created.
 #define WOS_IMPL_RtlRaiseException 1
+
+// ---------------------------------------------------------------------------
+// Video driver — kernel/video.cpp
+//
+// No GPU and nothing drawn; what these provide is the *shape* of one. The
+// load-bearing piece is the vblank interrupt: the console's driver calls back
+// into the title every vertical blank and the render loop waits on it, so
+// without it the game reaches VdInitializeRingBuffer and stops forever.
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_VdSetGraphicsInterruptCallback 1
+#define WOS_IMPL_VdInitializeEngines 1
+#define WOS_IMPL_VdShutdownEngines 1
+#define WOS_IMPL_VdQueryVideoMode 1
+#define WOS_IMPL_XGetVideoMode 1
+#define WOS_IMPL_VdQueryVideoFlags 1
+#define WOS_IMPL_VdGetCurrentDisplayGamma 1
+#define WOS_IMPL_VdGetCurrentDisplayInformation 1
+#define WOS_IMPL_VdInitializeRingBuffer 1
+#define WOS_IMPL_VdEnableRingBufferRPtrWriteBack 1
+#define WOS_IMPL_VdSetSystemCommandBufferGpuIdentifierAddress 1
+#define WOS_IMPL_VdCallGraphicsNotificationRoutines 1
+#define WOS_IMPL_VdIsHSIOTrainingSucceeded 1
+#define WOS_IMPL_VdRetrainEDRAM 1
+#define WOS_IMPL_VdRetrainEDRAMWorker 1
+#define WOS_IMPL_VdPersistDisplay 1
+#define WOS_IMPL_VdSwap 1
+
+// ---------------------------------------------------------------------------
+// The game's own debug output — kernel/debug.cpp
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_DbgPrint 1
+#define WOS_IMPL_OutputDebugStringA 1
+#define WOS_IMPL__vsnprintf 1
