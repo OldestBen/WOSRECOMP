@@ -33,9 +33,11 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
   renderer) and has not yet progressed to loading assets. The heartbeat
   found it busy-spinning at 5 million loop iterations a second on stubbed
   `KeWaitForSingleObject`/`KeResetEvent`. **Fixed — now 510/sec.** The game
-  is stable but *idle*: it waits and never progresses, and `VdSwap` has
-  never been called, so no frame has ever been presented. Per-event wait
-  statistics added to find what nothing is signalling. **Not yet run.**
+  is stable but *idle*. The wait statistics found why: `ev0` waited **25,517
+  times, signalled 3 times** (the idle JQ worker pool), and the main thread's
+  `KeWaitForSingleObject` targets an object we never saw created — a
+  **guest-embedded dispatcher object**, declared inline in the game's own
+  memory. Those are now adopted on first touch. **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -105,6 +107,40 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (16) — Wait statistics name the blocker: guest-embedded events
+
+- The counters answered it on their first run:
+  ```
+  ev0(manual) 25517/25508/3     <- waits / timeouts / signals
+  ev1(manual)     1/    0/3
+  ev3(auto)       1/    0/0
+  ```
+- **`ev0`: waited 25,517 times, signalled 3 times, all at startup.** Exactly
+  the pattern the counters were built to expose. `ev0` accounts for *every*
+  `NtWaitForSingleObjectEx` call (1,276 per 5 s in both), i.e. 255/s across
+  five JQ workers — the pool is idle, waiting for jobs the main thread never
+  posts.
+- **The more useful finding is what is missing from that table.** The main
+  thread's `KeWaitForSingleObject` runs at 128/s, but `ev1` and `ev3` show a
+  single wait each. So the Ke waits target an object that is **not in our
+  object table at all** — and the 128/s rate is my own unknown-object
+  fallback (a 1 ms sleep, ~7.8 ms real at Windows' default timer
+  resolution). The arithmetic identifies the fallback as the thing setting
+  the rate, which is a strong signal it was being hit every time.
+- **Cause: Xbox 360 dispatcher objects need not come from `NtCreateEvent`.**
+  A game can embed a `KEVENT` in one of its own structures and initialise it
+  in place; `Ke*` calls then operate on that guest address directly. We never
+  see such an object created, so every lookup failed and the main thread's
+  wait was answered by a sleep that signalled nothing.
+- Now adopted on first touch: an unrecognised guest pointer reaching
+  `KeWaitForSingleObject`/`KeSetEvent`/`KeResetEvent` gets a real event
+  created at that address, so a later `KeSetEvent` on the same address wakes
+  the same object. Announced once per object as
+  `[sync] KeWaitForSingleObject: adopting guest-embedded event at 0x... as evN`.
+- Chose **manual-reset** as the default for adopted events: an auto-reset
+  event we invented could silently consume a signal a real waiter needed.
+  Worth revisiting if a woken thread appears to miss wakeups.
 
 ### 2026-07-26 (15) — Spin fixed (5M/s -> 510/s); now idle-waiting
 

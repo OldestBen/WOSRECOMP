@@ -48,6 +48,13 @@ uint32_t RegisterObject(uint8_t* base, const std::shared_ptr<KernelObject>& obj)
     return obj->handle;
 }
 
+void RegisterObjectAt(uint32_t guestPtr, const std::shared_ptr<KernelObject>& obj)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    obj->guestPtr = guestPtr;
+    g_byGuestPtr[guestPtr] = obj;
+}
+
 std::shared_ptr<KernelObject> ObjectFromHandle(uint32_t handle)
 {
     std::lock_guard<std::mutex> lock(g_mutex);

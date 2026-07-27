@@ -424,6 +424,48 @@ namespace
 // itself instead of just going quiet.
 constexpr int64_t kLongWaitWarningMs = 5000;
 
+// Find the event at a guest address, creating one if the game declared it
+// inline in its own memory.
+//
+// Xbox 360 dispatcher objects do not have to come from NtCreateEvent: a game
+// can embed a KEVENT in one of its own structures and initialise it in place,
+// after which Ke* calls operate on that address directly. We never see such an
+// object created, so a plain lookup fails.
+//
+// That is what stalled the previous run. KeWaitForSingleObject was reaching
+// the unknown-object fallback -- a 1 ms sleep -- 128 times a second forever,
+// while the events we *did* know about showed a single wait each. Creating the
+// object on first touch means a later KeSetEvent on the same address wakes the
+// same object, which is the entire point.
+wos::EventObject* EmbeddedEvent(uint32_t guestPtr, const char* who)
+{
+    if (guestPtr == 0)
+        return nullptr;
+
+    auto existing = wos::ObjectFromAny(guestPtr);
+    if (auto* ev = dynamic_cast<wos::EventObject*>(existing.get()))
+        return ev;
+    if (existing != nullptr)
+        return nullptr;              // a real object of some other type
+
+    auto ev = std::make_shared<wos::EventObject>();
+    ev->type = "event(embedded)";
+    // Manual-reset is the safer default: an auto-reset event we invented could
+    // silently consume a signal a real waiter needed.
+    ev->manualReset = true;
+
+    {
+        std::lock_guard<std::mutex> lock(wos::g_eventListMutex);
+        ev->index = int(wos::g_allEvents.size());
+        wos::g_allEvents.push_back(ev);
+        printf("[sync] %s: adopting guest-embedded event at 0x%08X as ev%d\n",
+            who, guestPtr, ev->index);
+    }
+
+    wos::RegisterObjectAt(guestPtr, ev);
+    return ev.get();
+}
+
 bool WaitOnObject(uint32_t handleOrPtr, int64_t timeoutMs, const char* who)
 {
     auto obj = wos::ObjectFromAny(handleOrPtr);
@@ -450,9 +492,11 @@ bool WaitOnObject(uint32_t handleOrPtr, int64_t timeoutMs, const char* who)
         return true;
     }
 
-    // Unknown object. Returning immediately is what caused the spin in the
-    // first place, so yield rather than burning the core outright — wrong,
-    // but not catastrophically so, and visible in the heartbeat.
+    // Not a handle we issued: treat it as a dispatcher object the guest
+    // declared in its own memory, and adopt it.
+    if (auto* ev = EmbeddedEvent(handleOrPtr, who))
+        return ev->Wait(timeoutMs < 0 ? 100 : timeoutMs);
+
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     return true;
 }
@@ -483,7 +527,11 @@ PPC_FUNC(__imp__KeSetEvent)
     WOS_IMPORT_STUB("KeSetEvent");
 
     auto obj = wos::ObjectFromAny(ctx.r3.u32);
-    if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
+    auto* ev = dynamic_cast<wos::EventObject*>(obj.get());
+    if (ev == nullptr)
+        ev = EmbeddedEvent(ctx.r3.u32, "KeSetEvent");
+
+    if (ev != nullptr)
     {
         const uint32_t previous = ev->signalled ? 1u : 0u;
         ev->Set();
@@ -503,7 +551,11 @@ PPC_FUNC(__imp__KeResetEvent)
     WOS_IMPORT_STUB("KeResetEvent");
 
     auto obj = wos::ObjectFromAny(ctx.r3.u32);
-    if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
+    auto* ev = dynamic_cast<wos::EventObject*>(obj.get());
+    if (ev == nullptr)
+        ev = EmbeddedEvent(ctx.r3.u32, "KeResetEvent");
+
+    if (ev != nullptr)
     {
         const uint32_t previous = ev->signalled ? 1u : 0u;
         ev->Clear();

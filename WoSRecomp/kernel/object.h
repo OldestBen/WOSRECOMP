@@ -51,6 +51,12 @@ std::shared_ptr<KernelObject> ObjectFromAny(uint32_t handleOrPtr);
 // return a usable pointer for it. Returns the guest pointer, or 0.
 uint32_t RegisterPseudoHandle(uint8_t* base, uint32_t pseudoHandle, const char* type);
 
+// Register an object at a guest address the *guest* chose, rather than one we
+// allocated. Needed for dispatcher objects the game declares inline in its own
+// memory (a KEVENT in a struct, say) and initialises in place, so they never
+// pass through NtCreateEvent and we never see them created.
+void RegisterObjectAt(uint32_t guestPtr, const std::shared_ptr<KernelObject>& obj);
+
 void CloseHandle(uint32_t handle);
 
 // How many objects are live, for the run summary.
