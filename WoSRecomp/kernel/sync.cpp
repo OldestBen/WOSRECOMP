@@ -10,8 +10,11 @@
 #include "guest.h"
 #include "object.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <vector>
 #include <cstdio>
 #include <mutex>
 #include <thread>
@@ -26,10 +29,19 @@ struct EventObject : KernelObject
     bool signalled = false;
     bool manualReset = false;
 
+    // Per-object statistics. The interesting pattern is an object waited on
+    // constantly, timing out every time, and never signalled by anyone —
+    // that names the missing piece of the runtime exactly.
+    std::atomic<uint64_t> waits{0};
+    std::atomic<uint64_t> timeouts{0};
+    std::atomic<uint64_t> signals{0};
+    int index = 0;              // creation order, for readable reporting
+
     EventObject() { type = "event"; }
 
     void Set()
     {
+        signals.fetch_add(1, std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lock(m);
             signalled = true;
@@ -50,14 +62,21 @@ struct EventObject : KernelObject
     // Returns true if the wait was satisfied, false on timeout.
     bool Wait(int64_t timeoutMs)
     {
+        waits.fetch_add(1, std::memory_order_relaxed);
+
         std::unique_lock<std::mutex> lock(m);
 
         auto ready = [this] { return signalled; };
 
         if (timeoutMs < 0)
+        {
             cv.wait(lock, ready);
+        }
         else if (!cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), ready))
+        {
+            timeouts.fetch_add(1, std::memory_order_relaxed);
             return false;
+        }
 
         if (!manualReset)
             signalled = false;   // auto-reset consumes the signal
@@ -70,6 +89,53 @@ struct MutantObject : KernelObject
     std::recursive_mutex m;
     MutantObject() { type = "mutant"; }
 };
+
+// All events ever created, for reporting. Weak, so the report never keeps an
+// object alive past its natural life.
+std::mutex g_eventListMutex;
+std::vector<std::weak_ptr<EventObject>> g_allEvents;
+
+void ReportWaitActivity()
+{
+    struct Row { int index; uint32_t ptr; uint64_t waits, timeouts, signals; bool manual; };
+    std::vector<Row> rows;
+
+    {
+        std::lock_guard<std::mutex> lock(g_eventListMutex);
+        for (auto& weak : g_allEvents)
+        {
+            if (auto ev = weak.lock())
+            {
+                const uint64_t w = ev->waits.load(std::memory_order_relaxed);
+                if (w == 0)
+                    continue;
+                rows.push_back({ ev->index, ev->guestPtr, w,
+                                 ev->timeouts.load(std::memory_order_relaxed),
+                                 ev->signals.load(std::memory_order_relaxed),
+                                 ev->manualReset });
+            }
+        }
+    }
+
+    if (rows.empty())
+        return;
+
+    std::sort(rows.begin(), rows.end(),
+        [](const Row& a, const Row& b) { return a.waits > b.waits; });
+
+    printf("[waits]");
+    for (size_t i = 0; i < rows.size() && i < 5; ++i)
+    {
+        // "waits/timeouts/signals" — an object with waits ~= timeouts and
+        // zero signals is being waited on by someone nothing ever wakes.
+        printf("  ev%d(%s) %llu/%llu/%llu", rows[i].index,
+            rows[i].manual ? "manual" : "auto",
+            (unsigned long long)rows[i].waits,
+            (unsigned long long)rows[i].timeouts,
+            (unsigned long long)rows[i].signals);
+    }
+    printf("   [waits/timeouts/signals]\n");
+}
 
 void SignalEventIfAny(uint32_t handleOrPtr)
 {
@@ -122,6 +188,12 @@ PPC_FUNC(__imp__NtCreateEvent)
     auto ev = std::make_shared<wos::EventObject>();
     ev->manualReset = (eventType == 0);
     ev->signalled = (initialState != 0);
+
+    {
+        std::lock_guard<std::mutex> lock(wos::g_eventListMutex);
+        ev->index = int(wos::g_allEvents.size());
+        wos::g_allEvents.push_back(ev);
+    }
 
     const uint32_t handle = wos::RegisterObject(base, ev);
     if (handle == 0)

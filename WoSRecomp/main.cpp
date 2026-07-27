@@ -38,6 +38,7 @@
 
 #include "ppc_recomp_shared.h"
 #include "import_log.h"
+#include "object.h"
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -712,6 +713,7 @@ int main(int argc, char** argv)
                 printf("\n");
             }
 
+            wos::ReportWaitActivity();
             previous = std::move(current);
         }
     }).detach();

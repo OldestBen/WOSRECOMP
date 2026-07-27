@@ -31,10 +31,11 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - **Stage:** **THE GAME BOOTS AND RUNS.** 53 imports, GPU initialised, eight
   guest threads, render loop turning at 60 Hz. It does not draw (there is no
   renderer) and has not yet progressed to loading assets. The heartbeat
-  found it **busy-spinning at 5 million loop iterations a second** on
-  stubbed `KeWaitForSingleObject`/`KeResetEvent`; the whole kernel-mode
-  wait/event family is now implemented so those waits actually block.
-  **Not yet run.**
+  found it busy-spinning at 5 million loop iterations a second on stubbed
+  `KeWaitForSingleObject`/`KeResetEvent`. **Fixed — now 510/sec.** The game
+  is stable but *idle*: it waits and never progresses, and `VdSwap` has
+  never been called, so no frame has ever been presented. Per-event wait
+  statistics added to find what nothing is signalling. **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -104,6 +105,31 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (15) — Spin fixed (5M/s -> 510/s); now idle-waiting
+
+- The kernel-mode wait implementations worked exactly as intended:
+  | | before | after |
+  |---|---:|---:|
+  | total calls/sec | ~10,000,000 | **510** |
+  | `KeWaitForSingleObject` | 5,000,000/s | 127.6/s |
+  | `KeResetEvent` | 5,000,000/s | 127.6/s |
+  | `NtWaitForSingleObjectEx` | 254/s | 255/s (unchanged) |
+- The remaining rates are suspiciously exact: `NtWaitForSingleObjectEx` is
+  **precisely 2.000x** `KeWaitForSingleObject`. Regular polling, not chaos.
+- **But the game is idle, not working.** Held stable for 5+ minutes across
+  60 heartbeats with no new imports, and **`VdSwap` has never been called** —
+  so despite the vblank ticking, no frame has ever been presented. The main
+  loop is blocked somewhere before it renders.
+- Added per-event **waits / timeouts / signals** counters, reported each
+  heartbeat. The diagnostic pattern being looked for is an event with waits
+  ≈ timeouts and **zero signals**: something waiting on a thing nothing in
+  the runtime ever wakes. That names the missing piece precisely rather than
+  by elimination.
+- Deliberately did not guess further. Candidate explanations (a missing XAM
+  notification, an unsignalled GPU fence, a job queue nobody feeds) are all
+  plausible and the wait statistics will distinguish them in one run — which
+  is cheaper than implementing any of them speculatively.
 
 ### 2026-07-26 (14) — Heartbeat finds a 5-million-per-second busy-spin
 

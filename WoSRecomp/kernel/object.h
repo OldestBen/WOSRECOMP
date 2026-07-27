@@ -60,4 +60,9 @@ size_t LiveObjectCount();
 // Used by the synchronous file reads to complete their "async" event.
 void SignalEventIfAny(uint32_t handleOrPtr);
 
+// Print per-event wait statistics: waits / timeouts / signals. An event with
+// waits ~= timeouts and zero signals is one nothing ever wakes, which names a
+// missing piece of the runtime precisely.
+void ReportWaitActivity();
+
 } // namespace wos
