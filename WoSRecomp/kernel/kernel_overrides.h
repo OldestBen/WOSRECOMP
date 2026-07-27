@@ -61,6 +61,15 @@
 #define WOS_IMPL_NtClose 1
 #define WOS_IMPL_ObReferenceObjectByHandle 1
 #define WOS_IMPL_ObDereferenceObject 1
+// Kernel-mode wait/event family. As stubs these returned success immediately,
+// turning a blocking wait into a busy-spin: the heartbeat measured
+// KeWaitForSingleObject and KeResetEvent at an exactly equal 24,801,146 calls
+// per five seconds -- five million loop iterations a second.
+#define WOS_IMPL_KeWaitForSingleObject 1
+#define WOS_IMPL_KeWaitForMultipleObjects 1
+#define WOS_IMPL_KeSetEvent 1
+#define WOS_IMPL_KeResetEvent 1
+#define WOS_IMPL_KePulseEvent 1
 
 // ---------------------------------------------------------------------------
 // Threads — kernel/thread.cpp

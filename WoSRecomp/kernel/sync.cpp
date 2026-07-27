@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <mutex>
+#include <thread>
 
 namespace wos
 {
@@ -320,6 +321,173 @@ PPC_FUNC(__imp__ObDereferenceObject)
     WOS_IMPORT_STUB("ObDereferenceObject");
     // Reference counting is handled by shared_ptr on our side; the guest's
     // notion of a reference count is not something it can observe here.
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// Kernel-mode wait and event calls (Ke*).
+//
+// These are the same objects as the Nt* family, reached a different way: Nt*
+// takes a HANDLE, Ke* takes an object POINTER — the one
+// ObReferenceObjectByHandle handed out. ObjectFromAny accepts both, so the
+// implementations are shared.
+//
+// WHY THIS MATTERS: as stubs these returned success immediately, which turns
+// a *blocking* wait into a busy-spin. The heartbeat caught it precisely —
+// KeWaitForSingleObject and KeResetEvent called an exactly equal 24,801,146
+// times per five seconds, five million loop iterations a second burning a
+// core to no purpose, while the properly implemented NtWaitForSingleObjectEx
+// sat at a healthy 254/sec.
+//
+// A stub that returns "success" to a wait is not merely wrong, it inverts the
+// function's entire purpose.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+// A wait that never completes is indistinguishable from a hang. Report the
+// first time any single wait takes suspiciously long, so a deadlock names
+// itself instead of just going quiet.
+constexpr int64_t kLongWaitWarningMs = 5000;
+
+bool WaitOnObject(uint32_t handleOrPtr, int64_t timeoutMs, const char* who)
+{
+    auto obj = wos::ObjectFromAny(handleOrPtr);
+
+    if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
+    {
+        if (timeoutMs < 0)
+        {
+            // Split an infinite wait into a first bounded attempt so a
+            // permanent block can be reported once, then keep waiting.
+            if (ev->Wait(kLongWaitWarningMs))
+                return true;
+
+            printf("[sync] %s: still waiting on event 0x%08X after %llds\n",
+                who, handleOrPtr, (long long)(kLongWaitWarningMs / 1000));
+            return ev->Wait(-1);
+        }
+        return ev->Wait(timeoutMs);
+    }
+
+    if (auto* mutant = dynamic_cast<wos::MutantObject*>(obj.get()))
+    {
+        mutant->m.lock();
+        return true;
+    }
+
+    // Unknown object. Returning immediately is what caused the spin in the
+    // first place, so yield rather than burning the core outright — wrong,
+    // but not catastrophically so, and visible in the heartbeat.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return true;
+}
+
+} // namespace
+
+#ifdef WOS_IMPL_KeWaitForSingleObject
+// NTSTATUS KeWaitForSingleObject(PVOID Object,        // r3 — object pointer
+//                                KWAIT_REASON,        // r4
+//                                KPROCESSOR_MODE,     // r5
+//                                BOOLEAN Alertable,   // r6
+//                                PLARGE_INTEGER Timeout); // r7
+PPC_FUNC(__imp__KeWaitForSingleObject)
+{
+    WOS_IMPORT_STUB("KeWaitForSingleObject");
+
+    const int64_t timeoutMs = TimeoutToMillis(base, ctx.r7.u32);
+    const bool signalled = WaitOnObject(ctx.r3.u32, timeoutMs, "KeWaitForSingleObject");
+    ctx.r3.u64 = signalled ? wos::kStatusSuccess : wos::kStatusTimeout;
+}
+#endif
+
+#ifdef WOS_IMPL_KeSetEvent
+// LONG KeSetEvent(PRKEVENT Event, KPRIORITY Increment, BOOLEAN Wait);
+// Returns the event's PREVIOUS signalled state.
+PPC_FUNC(__imp__KeSetEvent)
+{
+    WOS_IMPORT_STUB("KeSetEvent");
+
+    auto obj = wos::ObjectFromAny(ctx.r3.u32);
+    if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
+    {
+        const uint32_t previous = ev->signalled ? 1u : 0u;
+        ev->Set();
+        ctx.r3.u64 = previous;
+    }
+    else
+    {
+        ctx.r3.u64 = 0;
+    }
+}
+#endif
+
+#ifdef WOS_IMPL_KeResetEvent
+// LONG KeResetEvent(PRKEVENT Event);  — returns the previous state.
+PPC_FUNC(__imp__KeResetEvent)
+{
+    WOS_IMPORT_STUB("KeResetEvent");
+
+    auto obj = wos::ObjectFromAny(ctx.r3.u32);
+    if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
+    {
+        const uint32_t previous = ev->signalled ? 1u : 0u;
+        ev->Clear();
+        ctx.r3.u64 = previous;
+    }
+    else
+    {
+        ctx.r3.u64 = 0;
+    }
+}
+#endif
+
+#ifdef WOS_IMPL_KePulseEvent
+PPC_FUNC(__imp__KePulseEvent)
+{
+    WOS_IMPORT_STUB("KePulseEvent");
+
+    auto obj = wos::ObjectFromAny(ctx.r3.u32);
+    if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
+    {
+        const uint32_t previous = ev->signalled ? 1u : 0u;
+        ev->Set();
+        ev->Clear();
+        ctx.r3.u64 = previous;
+    }
+    else
+    {
+        ctx.r3.u64 = 0;
+    }
+}
+#endif
+
+#ifdef WOS_IMPL_KeWaitForMultipleObjects
+// Waits on the first object only, then reports success.
+//
+// STATED SHORTCUT: a correct implementation needs WaitAll/WaitAny semantics
+// across a whole array. Waiting on one of them at least blocks rather than
+// spinning, which is the failure that actually mattered here; if the game
+// starts behaving as though the wrong object woke it, this is the first place
+// to look.
+PPC_FUNC(__imp__KeWaitForMultipleObjects)
+{
+    WOS_IMPORT_STUB("KeWaitForMultipleObjects");
+
+    const uint32_t count = ctx.r3.u32;
+    const uint32_t objectArray = ctx.r4.u32;
+
+    if (count == 0 || objectArray == 0)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ctx.r3.u64 = wos::kStatusSuccess;
+        return;
+    }
+
+    const uint32_t first = wos::LoadU32(base, objectArray);
+    WaitOnObject(first, 16, "KeWaitForMultipleObjects");
     ctx.r3.u64 = wos::kStatusSuccess;
 }
 #endif

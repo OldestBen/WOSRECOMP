@@ -28,13 +28,13 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **THE GAME BOOTS AND RUNS.** 53 imports, GPU initialised, six
-  named worker threads plus two more, and the render loop turning over at
-  60 Hz — `[video] 600 vblanks (~10 s)`. It does not draw anything (there is
-  no renderer) and does not appear to progress past its init loop yet.
-  Latest change mirrors the ring buffer read pointer from the GPU write
-  pointer register, and adds a 5-second heartbeat so a running game is
-  distinguishable from a hung one. **Not yet run.**
+- **Stage:** **THE GAME BOOTS AND RUNS.** 53 imports, GPU initialised, eight
+  guest threads, render loop turning at 60 Hz. It does not draw (there is no
+  renderer) and has not yet progressed to loading assets. The heartbeat
+  found it **busy-spinning at 5 million loop iterations a second** on
+  stubbed `KeWaitForSingleObject`/`KeResetEvent`; the whole kernel-mode
+  wait/event family is now implemented so those waits actually block.
+  **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -104,6 +104,37 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (14) — Heartbeat finds a 5-million-per-second busy-spin
+
+- The heartbeat earned its keep on its first run:
+  ```
+  KeWaitForSingleObject   x24,801,146 per 5 s   = 5.0 million/sec
+  KeResetEvent            x24,801,146 per 5 s   = 5.0 million/sec
+  NtWaitForSingleObjectEx x1,271      per 5 s   = 254/sec
+  ```
+- **Exactly equal counts for wait and reset** — that is one loop body:
+  wait, reset, check, repeat. And both were still stubs.
+- **A stub that returns success to a *wait* inverts the function's purpose.**
+  It does not merely return the wrong value; it converts a blocking call into
+  a busy-spin, burning a core at five million iterations a second. The
+  properly implemented `NtWaitForSingleObjectEx` sitting at 254/sec in the
+  same trace is the control group.
+- New variant of the recurring lesson, and worth stating separately: the
+  earlier cases were stubs that returned *wrong data*. This one returned
+  plausible data but destroyed the call's *timing semantics*.
+- Implemented the kernel-mode family in `sync.cpp`: `KeWaitForSingleObject`,
+  `KeWaitForMultipleObjects`, `KeSetEvent`, `KeResetEvent`, `KePulseEvent`.
+  Ke* takes an object *pointer* where Nt* takes a handle, and `ObjectFromAny`
+  already accepts both, so the object handling is shared.
+- Added a long-wait warning: an infinite wait is first attempted with a 5 s
+  bound, and if that expires it says so once before continuing to block. A
+  deadlock should name itself rather than going quiet.
+- **Stated shortcut:** `KeWaitForMultipleObjects` waits on the first object
+  only, rather than implementing WaitAll/WaitAny across the array. That at
+  least blocks instead of spinning, which was the failure that mattered; if
+  the game later behaves as though the wrong object woke it, this is the
+  first place to look.
 
 ### 2026-07-26 (13) — It boots. The render loop is running at 60 Hz.
 
