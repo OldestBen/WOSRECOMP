@@ -695,6 +695,13 @@ static int emitStubs(const Image& image, const char* outPath)
         << "// Each records that it was called and reports the order on exit, so a run\n"
         << "// shows the game's actual boot sequence rather than a static list.\n"
         << "//\n"
+        << "// Each also zeroes r3 before returning. Leaving it alone means the caller\n"
+        << "// reads whatever it happened to put there as the return value, which is\n"
+        << "// how a run ended up dereferencing guest 0x14 and 0xFFFFFFFD. Zero is\n"
+        << "// STATUS_SUCCESS for the many NTSTATUS-returning imports, and a null\n"
+        << "// handle/pointer for the rest — wrong sometimes, but wrong the same way\n"
+        << "// every run, which is the difference between a bug and a mystery.\n"
+        << "//\n"
         << "// These are strong definitions and override the recompiler's weak aliases.\n"
         << "//\n"
         << "// To implement one for real: write it in WoSRecomp/kernel/ and add\n"
@@ -717,6 +724,7 @@ static int emitStubs(const Image& image, const char* outPath)
         out << "#ifndef WOS_IMPL_" << bare << "\n"
             << "PPC_FUNC(" << names[i] << ") {\n"
             << "    WOS_IMPORT_STUB(\"" << bare << "\");\n"
+            << "    ctx.r3.u64 = 0;\n"
             << "}\n"
             << "#endif\n";
     }

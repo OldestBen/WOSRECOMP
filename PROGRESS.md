@@ -28,13 +28,14 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **The allocator works and the game no longer panics.**
-  `KeBugCheck` and `HalReturnToFirmware` are not called at all any more —
-  both were downstream of a failed first allocation. The game now allocates
-  ~33 MiB across four calls and reaches `MmQueryStatistics` /
-  `MmAllocatePhysicalMemoryEx`. Last stop was `EXCEPTION_FLT_INEXACT_RESULT`,
-  caused by the harness leaving the MXCSR exception masks cleared; fixed by
-  seeding `ctx.fpscr` from the host. **Fix not yet run.**
+- **Stage:** **31 of 214 imports reached.** The game allocates memory,
+  creates six threads, five events and a mutant, and tries to open a file.
+  It bugchecked once, cleanly, because thread creation returned garbage
+  handles. Kernel objects, real host-backed guest threads, events/mutants
+  and `NtCreateFile` path reporting are now implemented. **Not yet run.**
+- **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
+  disc, or a `private/game/` directory. Without it, paths are still reported
+  but every open fails.
 - **Import overrides:** implementations live in `WoSRecomp/kernel/*.cpp` and
   are listed in `kernel/kernel_overrides.h`, which compiles the matching
   generated stub out. Verified by link test — each import is defined exactly
@@ -115,6 +116,48 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (9) — 31 imports; kernel objects, threads and files implemented
+
+- The FP fix worked. The run reached **31 of 214 imports** and produced a
+  single clean bugcheck with a full backtrace through `_xstart` to
+  `__scrt_common_main_seh` — no cascade, exactly as intended.
+- **The counts localised the failure precisely.** `ExCreateThread` ×6,
+  `KeSetAffinityThread` ×6, `NtResumeThread` ×6 — and `RtlRaiseException`
+  ×6. One raised exception per thread created. `RtlNtStatusToDosError` ×13
+  says it was busy converting failures into error codes. The game was
+  creating six threads, getting garbage handles back, and throwing each
+  time; the bugcheck came from `sub_82B27EB8`, `0x12080` past `_xstart`, so
+  a CRT abort/assert handler.
+- Implemented the kernel object model, which is what all of that needed:
+  - `object.cpp` — handle table. Objects are registered **twice**: under a
+    handle, and under a small guest-visible block whose address is the
+    "object pointer" `ObReferenceObjectByHandle` hands back. The guest mixes
+    handles and pointers freely, so lookups accept either.
+  - `sync.cpp` — events (manual and auto-reset), mutants,
+    `NtWaitForSingleObjectEx` with real timeout conversion from the guest's
+    100 ns `LARGE_INTEGER`, `NtClose`, and the `Ob*` reference calls.
+  - `thread.cpp` — **guest threads are now real host threads.** Recompiled
+    functions are ordinary C++ functions, so a fresh `PPCContext` plus a
+    fresh guest stack is all one needs. `CREATE_SUSPENDED` parks the thread
+    on a release gate rather than deferring creation, so its handle is valid
+    immediately. Affinity and priority are accepted and ignored.
+  - `file.cpp` — `NtCreateFile` reads the `OBJECT_ATTRIBUTES` -> `ANSI_STRING`
+    name, maps device/drive paths onto a host directory (`WOS_GAME_ROOT` or
+    `private/game/`), and **reports every path requested** whether or not it
+    can open it. Knowing what the game asks for is the immediate value.
+- Note on the new thread trampoline: it calls `ctx.fpscr.loadFromHost()`.
+  Every thread has its own MXCSR, so a value-initialised context there
+  reproduces the FP-exception-mask bug from entry (8) — but only on worker
+  threads, which would have been considerably nastier to find.
+- **Generated stubs now zero `r3`.** Leaving it untouched means the caller
+  reads whatever it happened to leave there as the return value; that is how
+  a run came to dereference guest `0x14` and `0xFFFFFFFD`. Zero is
+  `STATUS_SUCCESS` for the many NTSTATUS imports and a null handle for the
+  rest — wrong sometimes, but wrong identically every run.
+- Re-verified by partial link that every import is defined exactly once,
+  with the 12 new implementations displacing their stubs and the rest still
+  covered. Both Win32 and POSIX builds compile.
 
 ### 2026-07-26 (8) — Allocator works, panic gone; FP exception masks fixed
 

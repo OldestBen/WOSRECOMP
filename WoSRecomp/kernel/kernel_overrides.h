@@ -28,6 +28,44 @@
 #define WOS_IMPL_NtFreeVirtualMemory 1
 
 // ---------------------------------------------------------------------------
+// Kernel objects, events, mutants — kernel/sync.cpp
+//
+// The game created five events, six threads and a mutant before giving up.
+// With stubs these all returned garbage handles, so every operation on them
+// afterwards was nonsense — and it raised exactly one exception per thread.
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_NtCreateEvent 1
+#define WOS_IMPL_NtSetEvent 1
+#define WOS_IMPL_NtClearEvent 1
+#define WOS_IMPL_NtPulseEvent 1
+#define WOS_IMPL_NtCreateMutant 1
+#define WOS_IMPL_NtReleaseMutant 1
+#define WOS_IMPL_NtWaitForSingleObjectEx 1
+#define WOS_IMPL_NtClose 1
+#define WOS_IMPL_ObReferenceObjectByHandle 1
+#define WOS_IMPL_ObDereferenceObject 1
+
+// ---------------------------------------------------------------------------
+// Threads — kernel/thread.cpp
+//
+// Guest threads become real host threads: recompiled functions are ordinary
+// C++ functions, so a fresh PPCContext and a fresh guest stack is all one
+// needs. Affinity and priority are accepted and ignored.
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_ExCreateThread 1
+#define WOS_IMPL_NtResumeThread 1
+#define WOS_IMPL_NtSuspendThread 1
+#define WOS_IMPL_KeSetAffinityThread 1
+#define WOS_IMPL_KeSetBasePriorityThread 1
+#define WOS_IMPL_KeQueryBasePriorityThread 1
+
+// ---------------------------------------------------------------------------
+// Files — kernel/file.cpp
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_NtCreateFile 1
+#define WOS_IMPL_NtOpenFile 1
+
+// ---------------------------------------------------------------------------
 // Thread-local storage — kernel/thread.cpp
 // ---------------------------------------------------------------------------
 #define WOS_IMPL_KeTlsAlloc 1

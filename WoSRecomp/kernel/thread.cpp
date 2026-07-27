@@ -14,14 +14,67 @@
 #include "import_log.h"
 #include "kernel_overrides.h"
 #include "guest.h"
+#include "object.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <thread>
 // (std::recursive_mutex lives in <mutex>)
+
+namespace wos
+{
+
+// A guest thread is a real host thread running recompiled guest code.
+//
+// That works because recompiled functions are ordinary C++ functions: give one
+// a fresh PPCContext and a fresh guest stack and it runs independently. What
+// it does *not* give us is the guest's scheduling model — affinity, priorities
+// and the hardware thread layout are all ignored, which is fine until the game
+// depends on a specific interleaving.
+struct ThreadObject : KernelObject
+{
+    std::thread host;
+    std::atomic<bool> started{false};
+    std::atomic<bool> finished{false};
+
+    std::mutex startMutex;
+    std::condition_variable startCv;
+    bool released = false;         // false while created-suspended
+
+    uint32_t entryPoint = 0;
+    uint32_t startContext = 0;
+    uint32_t stackBase = 0;
+    uint32_t stackSize = 0;
+    uint32_t threadId = 0;
+
+    ThreadObject() { type = "thread"; }
+
+    void WaitForRelease()
+    {
+        std::unique_lock<std::mutex> lock(startMutex);
+        startCv.wait(lock, [this] { return released; });
+    }
+
+    void Release()
+    {
+        {
+            std::lock_guard<std::mutex> lock(startMutex);
+            released = true;
+        }
+        startCv.notify_all();
+    }
+};
+
+} // namespace wos
 
 namespace
 {
+
+std::atomic<uint32_t> g_nextThreadId{0x1000};
+std::atomic<int> g_liveGuestThreads{0};
 
 // --- TLS ------------------------------------------------------------------
 //
@@ -48,7 +101,170 @@ std::recursive_mutex& CriticalSectionFor(uint32_t guestAddr)
     return g_criticalSections[guestAddr];
 }
 
+// Entry trampoline for a guest thread.
+//
+// Note ctx.fpscr.loadFromHost(): every thread has its own MXCSR, so a context
+// left value-initialised here reproduces exactly the FP-exception-mask bug the
+// main thread hit — with the added misery of only happening on worker threads.
+void GuestThreadMain(uint8_t* base, std::shared_ptr<wos::ThreadObject> self)
+{
+    self->WaitForRelease();
+
+    PPCFunc* fn = PPC_LOOKUP_FUNC(base, self->entryPoint);
+    if (fn == nullptr)
+    {
+        printf("[thread] no recompiled function at guest 0x%08X — thread %u does nothing\n",
+            self->entryPoint, self->threadId);
+        self->finished = true;
+        return;
+    }
+
+    PPCContext ctx{};
+    ctx.fpscr.loadFromHost();
+    ctx.r1.u64 = self->stackBase + self->stackSize - 0x100;   // leave a little headroom
+    ctx.r3.u64 = self->startContext;
+
+    printf("[thread] %u starting at guest 0x%08X (stack 0x%08X + 0x%X)\n",
+        self->threadId, self->entryPoint, self->stackBase, self->stackSize);
+
+    self->started = true;
+    ++g_liveGuestThreads;
+
+    fn(ctx, base);
+
+    --g_liveGuestThreads;
+    self->finished = true;
+    printf("[thread] %u returned\n", self->threadId);
+}
+
 } // namespace
+
+#ifdef WOS_IMPL_ExCreateThread
+// NTSTATUS ExCreateThread(
+//     PHANDLE handle,          // r3
+//     DWORD   stackSize,       // r4
+//     LPDWORD threadId,        // r5
+//     PVOID   xapiThreadStartup, // r6 — XAPI wrapper, ignored
+//     PVOID   startAddress,    // r7 — the guest function we must run
+//     PVOID   startContext,    // r8 — its argument
+//     DWORD   creationFlags);  // r9 — bit 0 = created suspended
+PPC_FUNC(__imp__ExCreateThread)
+{
+    WOS_IMPORT_STUB("ExCreateThread");
+
+    const uint32_t handleOut = ctx.r3.u32;
+    uint32_t stackSize = ctx.r4.u32;
+    const uint32_t threadIdOut = ctx.r5.u32;
+    const uint32_t startAddress = ctx.r7.u32;
+    const uint32_t startContext = ctx.r8.u32;
+    const uint32_t creationFlags = ctx.r9.u32;
+
+    if (stackSize < 0x10000)
+        stackSize = 0x10000;
+
+    auto thread = std::make_shared<wos::ThreadObject>();
+    thread->entryPoint = startAddress;
+    thread->startContext = startContext;
+    thread->stackSize = stackSize;
+    thread->threadId = g_nextThreadId.fetch_add(1);
+    thread->stackBase = wos::GuestAlloc(base, 0, stackSize, 0x10000);
+
+    if (thread->stackBase == 0)
+    {
+        printf("[thread] could not allocate a 0x%X byte guest stack\n", stackSize);
+        ctx.r3.u64 = wos::kStatusNoMemory;
+        return;
+    }
+
+    const uint32_t handle = wos::RegisterObject(base, thread);
+    if (handle == 0)
+    {
+        ctx.r3.u64 = wos::kStatusNoMemory;
+        return;
+    }
+
+    // CREATE_SUSPENDED: start the host thread anyway but park it on the
+    // release gate, so NtResumeThread is a signal rather than a thread launch.
+    // Simpler than deferring creation, and it keeps handle validity immediate.
+    if ((creationFlags & 1) == 0)
+        thread->Release();
+
+    thread->host = std::thread(GuestThreadMain, base, thread);
+    thread->host.detach();
+
+    if (handleOut != 0)
+        wos::StoreU32(base, handleOut, handle);
+    if (threadIdOut != 0)
+        wos::StoreU32(base, threadIdOut, thread->threadId);
+
+    printf("[thread] created %u: entry 0x%08X, ctx 0x%08X, stack 0x%X, flags 0x%X%s\n",
+        thread->threadId, startAddress, startContext, stackSize, creationFlags,
+        (creationFlags & 1) ? " (suspended)" : "");
+
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif
+
+#ifdef WOS_IMPL_NtResumeThread
+// NTSTATUS NtResumeThread(HANDLE, PULONG SuspendCount)
+PPC_FUNC(__imp__NtResumeThread)
+{
+    WOS_IMPORT_STUB("NtResumeThread");
+
+    auto obj = wos::ObjectFromAny(ctx.r3.u32);
+    auto* thread = dynamic_cast<wos::ThreadObject*>(obj.get());
+
+    if (thread == nullptr)
+    {
+        printf("[thread] NtResumeThread on unknown handle 0x%08X\n", ctx.r3.u32);
+        ctx.r3.u64 = wos::kStatusInvalidHandle;
+        return;
+    }
+
+    if (ctx.r4.u32 != 0)
+        wos::StoreU32(base, ctx.r4.u32, 1);   // previous suspend count
+
+    thread->Release();
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif
+
+#ifdef WOS_IMPL_NtSuspendThread
+PPC_FUNC(__imp__NtSuspendThread)
+{
+    WOS_IMPORT_STUB("NtSuspendThread");
+    // Suspending a running host thread safely is not something we can do yet,
+    // and pretending otherwise would deadlock rather than misbehave quietly.
+    printf("[thread] NtSuspendThread is not implemented — ignoring\n");
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif
+
+#ifdef WOS_IMPL_KeSetAffinityThread
+PPC_FUNC(__imp__KeSetAffinityThread)
+{
+    WOS_IMPORT_STUB("KeSetAffinityThread");
+    // The guest is pinning to one of six hardware threads. Host scheduling
+    // does not map onto that, and honouring it would only reduce parallelism.
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif
+
+#ifdef WOS_IMPL_KeSetBasePriorityThread
+PPC_FUNC(__imp__KeSetBasePriorityThread)
+{
+    WOS_IMPORT_STUB("KeSetBasePriorityThread");
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif
+
+#ifdef WOS_IMPL_KeQueryBasePriorityThread
+PPC_FUNC(__imp__KeQueryBasePriorityThread)
+{
+    WOS_IMPORT_STUB("KeQueryBasePriorityThread");
+    ctx.r3.u64 = 0;
+}
+#endif
 
 #ifdef WOS_IMPL_KeTlsAlloc
 PPC_FUNC(__imp__KeTlsAlloc)
