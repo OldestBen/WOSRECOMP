@@ -27,6 +27,11 @@
 #include <cinttypes>
 #include <string>
 #include <atomic>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include <file.h>
 #include <image.h>
@@ -656,6 +661,60 @@ int main(int argc, char** argv)
     // set, which is what the guest actually wants. PowerPC has FP traps
     // disabled by default via MSR[FE0,FE1], so the game never expects them.
     ctx.fpscr.loadFromHost();
+
+    // Heartbeat.
+    //
+    // A game that boots and then runs is indistinguishable, on a silent
+    // terminal, from a game that boots and then hangs — the import log only
+    // prints on *first* call, so a steady state prints nothing at all. This
+    // reports what changed since the last tick, which answers the only
+    // question that matters: is it doing work, or spinning?
+    std::thread([]
+    {
+        auto previous = wos::SnapshotImportCounts();
+
+        for (;;)
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+
+            auto current = wos::SnapshotImportCounts();
+
+            std::unordered_map<std::string, uint64_t> before;
+            for (const auto& [name, count] : previous)
+                before[name] = count;
+
+            std::vector<std::pair<const char*, uint64_t>> deltas;
+            uint64_t totalDelta = 0;
+            for (const auto& [name, count] : current)
+            {
+                const uint64_t was = before.count(name) ? before[name] : 0;
+                if (count > was)
+                {
+                    deltas.emplace_back(name, count - was);
+                    totalDelta += count - was;
+                }
+            }
+
+            if (deltas.empty())
+            {
+                printf("[heartbeat] no import activity in the last 5 s — "
+                       "%zu import(s) reached, likely spinning\n", current.size());
+            }
+            else
+            {
+                std::sort(deltas.begin(), deltas.end(),
+                    [](const auto& a, const auto& b) { return a.second > b.second; });
+
+                printf("[heartbeat] %llu call(s) across %zu import(s) in 5 s; busiest:",
+                    (unsigned long long)totalDelta, deltas.size());
+                for (size_t i = 0; i < deltas.size() && i < 4; ++i)
+                    printf(" %s x%llu", deltas[i].first, (unsigned long long)deltas[i].second);
+                printf("\n");
+            }
+
+            previous = std::move(current);
+        }
+    }).detach();
 
     printf("entry resolved to host %p\n", (void*)entry);
     printf("\nscratch stack at 0x%X (0x%X bytes)\n", kStackTop, kStackSize);

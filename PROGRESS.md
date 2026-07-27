@@ -28,14 +28,13 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **56 imports — the bugcheck is gone and the game is
-  initialising the GPU.** Physical memory now succeeds (three buffers of
-  4/4/16 MiB), and the trace runs through `VdInitializeEngines`,
-  `VdInitializeRingBuffer`, `VdSetGraphicsInterruptCallback`, EDRAM
-  training, and into `DbgPrint`. It then stops, waiting for a vertical-blank
-  interrupt that never arrives. A 60 Hz vblank thread, the `Vd*` video
-  driver, pseudo-handles and the game's own debug output are now
-  implemented. **Not yet run.**
+- **Stage:** **THE GAME BOOTS AND RUNS.** 53 imports, GPU initialised, six
+  named worker threads plus two more, and the render loop turning over at
+  60 Hz — `[video] 600 vblanks (~10 s)`. It does not draw anything (there is
+  no renderer) and does not appear to progress past its init loop yet.
+  Latest change mirrors the ring buffer read pointer from the GPU write
+  pointer register, and adds a 5-second heartbeat so a running game is
+  distinguishable from a hung one. **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -105,6 +104,35 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (13) — It boots. The render loop is running at 60 Hz.
+
+- ```
+  [video] first vblank interrupt delivered
+  [video] 600 vblanks (~10 s) — the render loop is turning over
+  ```
+  **Spider-Man: Web of Shadows boots and runs as native x86-64.** Kernel,
+  memory, threads, files, synchronisation and the video driver are all
+  carrying real load. Nothing is drawn — there is no renderer — but the game
+  is alive and looping.
+- Everything fixed last round confirmed by absence: `unknown handle
+  0xFFFFFFFE`, `RtlNtStatusToDosError`, `DbgPrint` and `_vsnprintf` all
+  vanished from the trace. The pseudo-handles resolved, and the game no
+  longer reaches its error-formatting path at all.
+- Ring buffer facts: buffer at guest `0x000914E0`, 2^14 = 16 KiB; read
+  pointer writeback at `0x0006023C`; GPU registers at `0x7FC80000` with the
+  game's only init-time write landing on `0x7FC80714` — CP_RB_WPTR.
+- **Suspected current stall, and a correction to my own code:** the vblank
+  thread was holding the ring buffer read pointer at 0. For a ring buffer
+  that means "the GPU is still at the start", so once the game advances its
+  write pointer it waits for a read pointer that never moves. That fits
+  exactly what was observed — a loop that runs but calls no further imports.
+  Now mirrors CP_RB_WPTR, modelling a GPU that consumes instantly.
+- Added a **5-second heartbeat**. The import log only prints on *first*
+  call, so a steady state prints nothing and a running game is
+  indistinguishable from a hung one on a silent terminal. The heartbeat
+  reports calls-since-last-tick and the busiest imports, which answers the
+  only question that matters: working, or spinning?
 
 ### 2026-07-26 (12) — Past the bugcheck; GPU init reached; vblank implemented
 

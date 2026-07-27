@@ -12,6 +12,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 namespace wos
 {
@@ -27,6 +29,11 @@ void DumpImportLog();
 // same thread, and blocking on it would deadlock — turning a crash report
 // into a hang, which is strictly worse than a slightly racy one.
 void DumpImportLogUnsafe();
+
+// A snapshot of call counts, for the periodic heartbeat. Returns pairs of
+// (name, total calls so far), so a caller can diff two snapshots and see what
+// the game is actually busy doing rather than only what it touched first.
+std::vector<std::pair<const char*, uint64_t>> SnapshotImportCounts();
 
 } // namespace wos
 

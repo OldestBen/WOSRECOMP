@@ -42,6 +42,12 @@ std::atomic<uint64_t> g_vblankCount{0};
 // wherever the write pointer is — i.e. "the GPU has caught up".
 std::atomic<uint32_t> g_rptrWriteBackPtr{0};
 
+// Xbox 360 GPU register window, and the ring buffer write pointer within it.
+// Confirmed by the game itself: its only write during init landed on
+// 0x7FC80714.
+constexpr uint32_t kGpuRegisterBase = 0x7FC80000;
+constexpr uint32_t kGpuWritePointerReg = kGpuRegisterBase + 0x714;
+
 // X_VIDEO_MODE, 0x30 bytes, big-endian throughout.
 void WriteVideoMode(uint8_t* base, uint32_t out)
 {
@@ -83,10 +89,20 @@ void VblankThread(uint8_t* base)
         next += std::chrono::microseconds(16667);   // ~60 Hz
         std::this_thread::sleep_until(next);
 
-        // Tell the game the GPU has consumed everything we were given.
+        // Tell the game the GPU has consumed everything it submitted.
+        //
+        // Holding this at 0 is wrong in a way that hangs: for a ring buffer,
+        // read == 0 means "the GPU is still at the start", so once the game
+        // advances its write pointer it waits for a read pointer that never
+        // moves. Mirroring the write pointer instead models a GPU that
+        // consumes commands instantly, which is exactly what a run with no
+        // rendering should look like.
+        //
+        // The write pointer lives in the GPU register window. The game wrote
+        // to guest 0x7FC80714 once during init, which is CP_RB_WPTR.
         const uint32_t rptrPtr = g_rptrWriteBackPtr.load(std::memory_order_relaxed);
         if (rptrPtr != 0)
-            wos::StoreU32(base, rptrPtr, 0);
+            wos::StoreU32(base, rptrPtr, wos::LoadU32(base, kGpuWritePointerReg));
 
         const uint32_t callback = g_interruptCallback.load(std::memory_order_relaxed);
         if (callback == 0)

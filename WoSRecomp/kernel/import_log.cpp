@@ -72,6 +72,17 @@ void DumpImportLog()
     DumpLocked();
 }
 
+std::vector<std::pair<const char*, uint64_t>> SnapshotImportCounts()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::vector<std::pair<const char*, uint64_t>> out;
+    out.reserve(g_order.size());
+    for (const char* name : g_order)
+        out.emplace_back(name, g_counts[name]);
+    return out;
+}
+
 void DumpImportLogUnsafe()
 {
     // try_to_lock, not lock: a fault inside LogImportCall leaves this thread
