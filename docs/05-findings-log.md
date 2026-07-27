@@ -878,6 +878,54 @@ implementation status (stubbed / implemented / working).
 
 *(none yet)*
 
+## Reading the guest's own code (`--disasm` / `--xrefs`)
+
+Added 2026-07-27, after guessing wrong twice in a row about what the idle
+threads are doing.
+
+The runtime can say *where* a thread is (`sub_82AC0C10 +0x212`) but not
+*what it is doing there*, so every conclusion about the wait/signal layer so
+far has been inference from behaviour. Two of those inferences were wrong:
+the graphics interrupt callback was being called with two arguments instead
+of three, and the "long wait" was attributed to the main thread when the
+backtrace showed a spawned one.
+
+`Image::ParseImage` already decrypts and decompresses the XEX, and XenonUtils
+ships the same PowerPC disassembler XenonRecomp uses, so reading the actual
+instructions is a thin wrapper rather than new machinery:
+
+```
+xex_info private/default.xex --disasm 0x82AC0C10        # to end of function
+xex_info private/default.xex --disasm 0x82AC0C10 200    # fixed count
+xex_info private/default.xex --xrefs  0x82AB9840        # who calls/references it
+```
+
+`--disasm` marks branch targets with `>` so loops are visible, annotates a
+`bl` with its symbol (an import thunk therefore names the kernel call), and
+flags backward branches. With no count it walks to a terminator, but only
+once no branch seen so far still targets past it — functions have several
+`blr`s and stopping at the first truncates. It says explicitly whether it
+ended on a terminator, so a truncated dump can't be mistaken for a whole
+function.
+
+`--xrefs` scans every code section for direct branches to an address and
+every section for a stored 4-byte pointer to it (vtables, callback tables).
+Pointed at an import thunk it lists every call site of that kernel function
+— which is the way to answer "what is supposed to signal this event" rather
+than continuing to guess.
+
+Neither mode prints data bytes or strings: addresses, mnemonics and operands
+only, the same class of structural metadata the other modes emit.
+
 ## Open questions / blockers
 
-*(none yet)*
+- **The game is stable but idle.** Eight guest threads run, the vblank
+  interrupt fires at 60 Hz, ~24 MB of GPU buffers are allocated, but `VdSwap`
+  has never been called and no frame has ever been presented. Every thread
+  waits; nothing signals. The two graphics threads wait on events at
+  `ctx+0x20` (logged as `ev5`/`ev6`); both show 0 signals.
+- **The main thread spins at `sub_82AC0C10 +0x212`.** Fixing the interrupt
+  callback's argument count advanced it from `+0x1B7` (calling into
+  `sub_82B13200`) to `+0x212`, 91 bytes further into the same function —
+  progress, not a fix. What it polls there is the next thing to read with
+  `--disasm`, not to infer.

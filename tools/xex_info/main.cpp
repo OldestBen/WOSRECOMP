@@ -22,6 +22,8 @@
 #include <string>
 #include <toml++/toml.hpp>
 #include <ppc.h>
+#include <disasm.h>
+#include <cstdlib>
 
 // ---------------------------------------------------------------------------
 // --helpers: locate the compiler-generated register save/restore functions
@@ -737,6 +739,249 @@ static int emitStubs(const Image& image, const char* outPath)
     return EXIT_SUCCESS;
 }
 
+// ---------------------------------------------------------------------------
+// --disasm: print the guest's own instructions.
+//
+// Every layer below this has been inferred: which event a thread waits on,
+// what a spin loop polls, what an interrupt callback does with its arguments.
+// Inference has been wrong twice. This reads the code instead.
+//
+// The image is already decrypted and decompressed by Image::ParseImage, and
+// XenonUtils ships the same PowerPC disassembler XenonRecomp uses, so this is
+// a thin wrapper: locate the section, walk instructions, print them.
+//
+// It prints addresses, mnemonics and operands — no data bytes, no strings —
+// which is the same class of structural metadata the other modes emit.
+// ---------------------------------------------------------------------------
+
+// Branch target of a b/ba/bl/bla (op 18) or bc/bca/bcl/bcla (op 16), or 0 if
+// the instruction is neither. Absolute forms ignore the current address.
+static uint32_t branchTarget(uint32_t addr, uint32_t insn)
+{
+    if (PPC_OP(insn) == 18)
+        return static_cast<uint32_t>((PPC_BA(insn) ? 0 : addr) + PPC_BI(insn));
+    if (PPC_OP(insn) == 16)
+        return static_cast<uint32_t>((PPC_BA(insn) ? 0 : addr) + PPC_BD(insn));
+    return 0;
+}
+
+// address -> symbol name, for annotating call targets. The import table is the
+// interesting part: a `bl` to an __imp__ thunk names the kernel call directly.
+static std::map<uint32_t, std::string> symbolMap(const Image& image)
+{
+    std::map<uint32_t, std::string> out;
+    for (const auto& sym : image.symbols)
+        out.emplace(static_cast<uint32_t>(sym.address), sym.name);
+    return out;
+}
+
+static int disasm(const Image& image, uint32_t addr, uint32_t count)
+{
+    const Section* sec = nullptr;
+    for (const auto& s : image.sections)
+    {
+        if (s.data != nullptr && addr >= s.base && addr < s.base + s.size)
+        {
+            sec = &s;
+            break;
+        }
+    }
+    if (sec == nullptr)
+    {
+        fprintf(stderr, "0x%08X is not inside any mapped section.\n", addr);
+        return EXIT_FAILURE;
+    }
+    if (!(sec->flags & SectionFlags_Code))
+        printf("NOTE: 0x%08X is in \"%s\", which is not marked CODE.\n\n", addr, sec->name.c_str());
+
+    const std::map<uint32_t, std::string> symbols = symbolMap(image);
+
+    auto readAt = [&](uint32_t a, uint32_t& insn) -> bool {
+        if (a < sec->base || a + 4 > sec->base + sec->size)
+            return false;
+        uint32_t raw;
+        std::memcpy(&raw, sec->data + (a - sec->base), 4);
+        insn = ByteSwap(raw);
+        return true;
+    };
+
+    // count == 0 means "run to the end of the function". A function can have
+    // several `blr`s — early returns are normal — so stopping at the first one
+    // truncates. Stop at a terminator only once no branch seen so far still
+    // targets an address beyond it.
+    const bool untilEnd = (count == 0);
+    const uint32_t scanLimit = untilEnd ? 0x4000 : count;
+
+    // Pass 1: find the extent and collect the addresses actually branched to,
+    // so pass 2 can mark exactly those. Marking "everything below the furthest
+    // target" instead would flag every instruction in the range.
+    uint32_t end = addr;
+    std::vector<uint32_t> labels;
+    {
+        uint32_t furthest = addr;
+        for (uint32_t i = 0; i < scanLimit; ++i)
+        {
+            const uint32_t a = addr + i * 4;
+            uint32_t insn;
+            if (!readAt(a, insn))
+                break;
+            end = a + 4;
+
+            if (const uint32_t t = branchTarget(a, insn); t != 0)
+            {
+                furthest = std::max(furthest, t);
+                labels.push_back(t);
+            }
+            if (untilEnd && isTerminator(insn) && a >= furthest)
+                break;
+        }
+        std::sort(labels.begin(), labels.end());
+        labels.erase(std::unique(labels.begin(), labels.end()), labels.end());
+    }
+
+    printf("Disassembly of 0x%08X..0x%08X in section \"%s\" (%u instructions):\n\n",
+        addr, end, sec->name.c_str(), (end - addr) / 4);
+
+    for (uint32_t a = addr; a < end; a += 4)
+    {
+        uint32_t insn;
+        if (!readAt(a, insn))
+            break;
+
+        ppc_insn decoded{};
+        ppc::Disassemble(sec->data + (a - sec->base), a, decoded);
+
+        const bool isLabel = std::binary_search(labels.begin(), labels.end(), a);
+
+        printf("  %08X  %08X  %c ", a, insn, isLabel ? '>' : ' ');
+        if (decoded.opcode != nullptr)
+            printf("%-12s %s", decoded.opcode->name, decoded.op_str);
+        else
+            printf("%-12s <undecodable>", ".long");
+
+        // The disassembler already resolves branch targets into op_str, so add
+        // only what it can't say: the symbol behind a call (which is how a `bl`
+        // becomes "KeWaitForSingleObject"), and whether a branch goes backward
+        // (which is how a spin loop becomes visible).
+        if (const uint32_t t = branchTarget(a, insn); t != 0)
+        {
+            auto it = symbols.find(t);
+            if (it != symbols.end())
+                printf("   ; %s", it->second.c_str());
+            else if (t <= a)
+                printf("   ; backward");
+        }
+        printf("\n");
+    }
+
+    printf("\n'>' marks an address something in this range branches to.\n");
+    if (untilEnd)
+    {
+        uint32_t last;
+        if (readAt(end - 4, last) && isTerminator(last))
+            printf("Ends on a terminator, so this is the whole function.\n");
+        else
+            printf("Did NOT end on a terminator — the function continues past 0x%08X.\n", end);
+    }
+
+    return EXIT_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// --xrefs: find everything that references an address.
+//
+// Answers the question the runtime keeps raising in reverse: not "what is this
+// thread waiting for" but "who is supposed to signal it". Scans every code
+// section for direct branches to the address, and every section for a stored
+// pointer to it (vtables, callback tables, jump tables).
+//
+// Pointing this at an import thunk lists every call site of that kernel
+// function — e.g. every place the game calls KeSetEvent.
+// ---------------------------------------------------------------------------
+static int xrefs(const Image& image, uint32_t addr)
+{
+    const std::map<uint32_t, std::string> symbols = symbolMap(image);
+    auto nameOf = [&](uint32_t a) -> std::string {
+        auto it = symbols.find(a);
+        return it != symbols.end() ? it->second : std::string();
+    };
+
+    if (const std::string n = nameOf(addr); !n.empty())
+        printf("Target 0x%08X is symbol \"%s\".\n\n", addr, n.c_str());
+    else
+        printf("Target 0x%08X (no symbol).\n\n", addr);
+
+    size_t branches = 0, pointers = 0;
+
+    printf("--- direct branches ---\n");
+    for (const auto& s : image.sections)
+    {
+        if (!(s.flags & SectionFlags_Code) || s.data == nullptr)
+            continue;
+        for (uint32_t off = 0; off + 4 <= s.size; off += 4)
+        {
+            uint32_t raw;
+            std::memcpy(&raw, s.data + off, 4);
+            const uint32_t insn = ByteSwap(raw);
+            const uint32_t site = static_cast<uint32_t>(s.base) + off;
+            if (branchTarget(site, insn) != addr)
+                continue;
+
+            ppc_insn decoded{};
+            ppc::Disassemble(s.data + off, site, decoded);
+            printf("  %08X  %-10s %s\n", site,
+                decoded.opcode ? decoded.opcode->name : "?", decoded.op_str);
+            ++branches;
+        }
+    }
+    if (branches == 0)
+        printf("  (none)\n");
+
+    // A stored pointer is 4-byte aligned in practice (compilers align pointer
+    // tables), so step by 4 rather than by 1 — the same assumption the helper
+    // scan makes, and it keeps a 5 MB image scan instant.
+    printf("\n--- stored pointers ---\n");
+    for (const auto& s : image.sections)
+    {
+        if (s.data == nullptr)
+            continue;
+        for (uint32_t off = 0; off + 4 <= s.size; off += 4)
+        {
+            uint32_t raw;
+            std::memcpy(&raw, s.data + off, 4);
+            if (ByteSwap(raw) != addr)
+                continue;
+            const uint32_t at = static_cast<uint32_t>(s.base) + off;
+            printf("  %08X  in \"%s\"\n", at, s.name.c_str());
+            ++pointers;
+            if (pointers >= 64)
+            {
+                printf("  ... (stopping at 64)\n");
+                break;
+            }
+        }
+        if (pointers >= 64)
+            break;
+    }
+    if (pointers == 0)
+        printf("  (none)\n");
+
+    printf("\n%zu branch(es), %zu stored pointer(s).\n", branches, pointers);
+    return EXIT_SUCCESS;
+}
+
+// Parse a hex-or-decimal address from the command line. Returns false rather
+// than silently yielding 0, which would scan for the wrong thing.
+static bool parseAddr(const char* text, uint32_t& out)
+{
+    char* end = nullptr;
+    const unsigned long long v = std::strtoull(text, &end, 0);
+    if (end == text || *end != '\0' || v > 0xFFFFFFFFull)
+        return false;
+    out = static_cast<uint32_t>(v);
+    return true;
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2)
@@ -753,6 +998,11 @@ int main(int argc, char** argv)
         printf("                   i.e. what the runtime has to implement\n");
         printf("  --emit-stubs <f> generate logging stubs for every import, so a run\n");
         printf("                   reveals the actual boot sequence\n");
+        printf("  --disasm <addr> [count]\n");
+        printf("                   disassemble guest code at an address; count 0 (or\n");
+        printf("                   omitted) runs to the end of the function\n");
+        printf("  --xrefs <addr>   list every branch to, and stored pointer to, an\n");
+        printf("                   address — i.e. who calls or references it\n");
         return EXIT_SUCCESS;
     }
 
@@ -761,8 +1011,37 @@ int main(int argc, char** argv)
     const char* stubsOut = nullptr;
     const char* switchToml = nullptr;
     const char* writeConfig = nullptr;
+    bool wantDisasm = false, wantXrefs = false;
+    uint32_t disasmAddr = 0, disasmCount = 0, xrefsAddr = 0;
     for (int i = 2; i < argc; ++i)
     {
+        if (std::strcmp(argv[i], "--disasm") == 0)
+        {
+            if (i + 1 >= argc || !parseAddr(argv[i + 1], disasmAddr))
+            {
+                fprintf(stderr, "--disasm requires an address, e.g. --disasm 0x82AC0C10\n");
+                return EXIT_FAILURE;
+            }
+            ++i;
+            wantDisasm = true;
+            // An optional instruction count may follow. Only consume the next
+            // argument if it actually parses as a number, so a following flag
+            // isn't swallowed.
+            if (i + 1 < argc && parseAddr(argv[i + 1], disasmCount))
+                ++i;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--xrefs") == 0)
+        {
+            if (i + 1 >= argc || !parseAddr(argv[i + 1], xrefsAddr))
+            {
+                fprintf(stderr, "--xrefs requires an address, e.g. --xrefs 0x82AB9840\n");
+                return EXIT_FAILURE;
+            }
+            ++i;
+            wantXrefs = true;
+            continue;
+        }
         if (std::strcmp(argv[i], "--helpers") == 0)
         {
             wantHelpers = true;
@@ -864,6 +1143,12 @@ int main(int argc, char** argv)
         fprintf(stderr, "Failed to parse \"%s\": %s\n", argv[1], e.what());
         return EXIT_FAILURE;
     }
+
+    if (wantDisasm)
+        return disasm(image, disasmAddr, disasmCount);
+
+    if (wantXrefs)
+        return xrefs(image, xrefsAddr);
 
     if (stubsOut != nullptr)
         return emitStubs(image, stubsOut);
