@@ -123,8 +123,21 @@ void VblankThread(uint8_t* base)
             continue;
 
         ctx.r1.u64 = s_interruptStack + 0x20000 - 0x100;
+
+        // THREE arguments, not two: (source, cpu, userdata).
+        //
+        // This was passing userdata in r4 — the *cpu* slot — leaving r5
+        // holding whatever was there before. The callback would then use a
+        // garbage pointer as its context, which is almost certainly what the
+        // unexplained reads of guest 0x59000000 and 0x66020000 were: a
+        // dereference of a value that was never a pointer.
+        //
+        // The consequence is that the callback did nothing useful, so the two
+        // graphics threads waiting on their ctx+0x20 events were never woken,
+        // and the main thread spun in the graphics layer waiting on them.
         ctx.r3.u64 = 0;                                             // source: vblank
-        ctx.r4.u64 = g_interruptUserData.load(std::memory_order_relaxed);
+        ctx.r4.u64 = 0;                                             // cpu number
+        ctx.r5.u64 = g_interruptUserData.load(std::memory_order_relaxed);
 
         fn(ctx, base);
 

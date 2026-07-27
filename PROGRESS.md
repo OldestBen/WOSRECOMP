@@ -115,6 +115,39 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Log
 
+### 2026-07-26 (21) — Watchdog delivers; graphics interrupt called with wrong arguments
+
+- The all-thread watchdog worked and produced the one stack that mattered:
+  ```
+  main thread
+    #0   sub_82B13200 +0x19        <- 25 bytes in: a tiny spin loop
+    #1   sub_82AC0C10 +0x1B7
+    #2   sub_82ABA260 +0x2D5
+    #3   sub_82ABAD58 +0x127
+    ...  _xstart
+  ```
+- The callers place it squarely in the **graphics layer**: the interrupt
+  callback is `0x82AB9840` and the graphics threads are `0x82ACECF0`, so
+  `0x82ABA260` / `0x82ABAD58` / `0x82AC0C10` are its neighbours.
+- Full picture, with every thread now accounted for: five JQ workers idle on
+  `ev0`; the master idle; **both graphics threads blocked on their own
+  `ctx+0x20` events**; and the main thread spinning in the graphics layer
+  waiting for those threads. On hardware, the **graphics interrupt** is what
+  wakes them.
+- **The bug is mine.** The Xbox 360 graphics interrupt callback takes three
+  arguments — `(source, cpu, userdata)` — and I was passing two, so
+  `userdata` went into the `cpu` slot and `r5` held whatever happened to be
+  there. The callback then used a non-pointer as its context.
+- **That also retrospectively explains the unexplained reads.** Guest
+  `0x59000000` and `0x66020000` were logged early and never accounted for;
+  neither is a heap or physical-alias address. A callback dereferencing a
+  garbage context is exactly the shape of thing that produces them.
+- Fixed: `r3 = source`, `r4 = cpu`, `r5 = userdata`.
+- Worth noting how this was found. Three rounds of inference about the main
+  thread produced one wrong answer and two dead ends; the watchdog produced
+  the answer on its first run. The cost of building the general tool was
+  about the same as one more guess.
+
 ### 2026-07-26 (20) — Build broke on MSVC only; stale-binary trap closed
 
 - **`main.cpp` failed to compile on Windows**: `no type named 'mutex' in
