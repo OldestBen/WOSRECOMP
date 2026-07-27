@@ -28,12 +28,13 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **33 of 214 imports; six guest threads running concurrently and
-  a real file opened.** `D:\game_shared.ini` resolved to the host disc dump
-  and opened first try. The run then aborted because
-  `NtQueryInformationFile` was a stub: the game read uninitialised memory as
-  the file size and tried to allocate 2 GB. File size/position/read are now
-  implemented. **Not yet run.**
+- **Stage:** **32 imports; the game reads its config file and names its
+  threads.** `game_shared.ini` read in full (45 bytes), and the thread pool
+  identifies itself: five `JQ worker N (CPU n)` plus a `Game Master`. Still
+  bugchecks at the same place on the main thread. Latest suspects — all
+  out-parameter stubs that wrote nothing, plus physical memory that always
+  returned NULL — are now implemented in `kernel/system.cpp`.
+  **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -103,6 +104,41 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (11) — Config file read; physical memory and clocks implemented
+
+- **`game_shared.ini` read in full** — 45 bytes, size query correct, no more
+  2 GB allocation. `RtlNtStatusToDosError` disappeared from the trace
+  entirely, which is the clean confirmation that the file path stopped
+  failing.
+- **The thread pool named itself**, via the decoded `SetThreadName`
+  exceptions: `JQ worker 0 (CPU 2)`, `1 (CPU 5)`, `2 (CPU 3)`, `3 (CPU 1)`,
+  `4 (CPU 4)`, and `Game Master`. A job-queue pool pinned across the 360's
+  six hardware threads. Worth recording as structural knowledge about the
+  engine, not just a log curiosity.
+- **Same bugcheck, same backtrace, same place** — main thread, via
+  `sub_8290B1D0 -> sub_829395C0 -> sub_8290BC28 -> sub_82515E60 ->
+  sub_82515430 -> sub_82514AC8 -> sub_82B27EB8`. So the file fix, while
+  correct, was not on the critical path to the abort.
+- **Four more out-parameter stubs found — the same failure shape for the
+  fourth time today.** `MmQueryStatistics` (×6) takes an `MM_STATISTICS*`
+  and filled in nothing; `KeQuerySystemTime` (×2) takes a `LARGE_INTEGER*`
+  and filled in nothing; `KeQueryPerformanceFrequency` returned 0, which is
+  a *divisor* in the caller; `KeGetCurrentProcessType` returned 0 (idle)
+  rather than 1 (title).
+- **And `MmAllocatePhysicalMemoryEx` returned NULL every time (×4).** That
+  is very likely the real story behind the unexplained reads at
+  `0xAD000010`, `0xAE010000` and `0x59000000` — the Xbox 360 aliases RAM
+  into `0xA0000000..0xBFFFFFFF`, and the game was dereferencing physical
+  memory it had asked for and never received. `0x59000000` sits outside
+  that window, so it may be a separate garbage pointer rather than the same
+  cause; noting the uncertainty rather than assuming.
+- Implemented in the new `kernel/system.cpp`: a physical allocator in the
+  uncached alias window, `MmGetPhysicalAddress`, a filled-in `MM_STATISTICS`
+  reporting 512 MiB with the title owning three quarters, real system time
+  in Windows 100 ns ticks, and the 50 MHz timebase frequency.
+- Link-tested again: every import defined exactly once, seven new
+  implementations displacing their stubs. Both builds compile.
 
 ### 2026-07-26 (10) — Six threads run concurrently; first real file opened
 

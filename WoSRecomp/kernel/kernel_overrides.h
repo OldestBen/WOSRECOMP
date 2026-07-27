@@ -28,6 +28,23 @@
 #define WOS_IMPL_NtFreeVirtualMemory 1
 
 // ---------------------------------------------------------------------------
+// Physical memory, statistics and clocks — kernel/system.cpp
+//
+// Four of these take out-parameters and, as stubs, filled in nothing — the
+// same failure that broke NtQueryInformationFile. The physical ones also
+// explain the reads at 0xAD000010, 0xAE010000 and 0x59000000: the Xbox 360
+// aliases RAM into 0xA0000000-0xBFFFFFFF, and every physical allocation was
+// returning NULL.
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_MmAllocatePhysicalMemoryEx 1
+#define WOS_IMPL_MmFreePhysicalMemory 1
+#define WOS_IMPL_MmGetPhysicalAddress 1
+#define WOS_IMPL_MmQueryStatistics 1
+#define WOS_IMPL_KeQuerySystemTime 1
+#define WOS_IMPL_KeQueryPerformanceFrequency 1
+#define WOS_IMPL_KeGetCurrentProcessType 1
+
+// ---------------------------------------------------------------------------
 // Kernel objects, events, mutants — kernel/sync.cpp
 //
 // The game created five events, six threads and a mutant before giving up.

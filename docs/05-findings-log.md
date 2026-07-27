@@ -783,6 +783,67 @@ merely a carrier for a name string a debugger is meant to intercept.
 `ExceptionInformation[1]` is the name pointer, `[2]` the thread id. Decoded
 now, so the trace prints thread names instead of six alarming lines.
 
+## Engine structure: the thread pool (2026-07-26)
+
+Decoding the `SetThreadName` exceptions gave the engine's own names for its
+threads:
+
+| Thread | Name |
+|---|---|
+| 0x1000 | `JQ worker 0 (CPU 2)` |
+| 0x1001 | `JQ worker 1 (CPU 5)` |
+| 0x1002 | `JQ worker 2 (CPU 3)` |
+| 0x1003 | `JQ worker 3 (CPU 1)` |
+| 0x1004 | `JQ worker 4 (CPU 4)` |
+| — | `Game Master` |
+
+A **job-queue worker pool**, five workers explicitly pinned across the Xbox
+360's six hardware threads (CPU 1–5, leaving CPU 0 for the master/system),
+plus a `Game Master` thread. Five workers share entry `0x82963840`; the
+master is `0x829677D0`.
+
+This is structural knowledge about the engine, not just a log curiosity: it
+says the game is genuinely parallel, that work is dispatched through a queue,
+and that CPU affinity is meaningful to it. `KeSetAffinityThread` is currently
+a no-op, which is fine while nothing depends on *which* core runs what — but
+worth remembering if timing-dependent misbehaviour turns up later.
+
+## Out-parameter stubs: the recurring failure (2026-07-26)
+
+Four separate times in one day, the same bug shape stopped progress:
+
+| Function | What the stub did | What the caller then did |
+|---|---|---|
+| `KeBugCheck` | returned | panicked again, forever (~19,000 deep) |
+| *all stubs* | left `r3` untouched | read a stale register as the return value |
+| `NtQueryInformationFile` | returned success, wrote nothing | read `0x82010000` as a file size, asked for 2 GB |
+| `MmQueryStatistics` | returned success, wrote nothing | read uninitialised memory as free-memory figures |
+| `KeQuerySystemTime` | returned, wrote nothing | uninitialised timestamp |
+| `KeQueryPerformanceFrequency` | returned 0 | zero *divisor* |
+
+**A stub that reports success without filling in its out-parameter is worse
+than one that returns an error**, because the caller has no way to detect it
+and the damage surfaces far from the cause. The generated stubs now zero
+`r3`, which makes them deterministic, but any import with an out-parameter
+still has to be implemented properly before its caller can be trusted.
+
+## Physical memory (2026-07-26)
+
+`MmAllocatePhysicalMemoryEx` returns a **guest pointer**, not an NTSTATUS, so
+the stub's zero meant "out of memory" on all four calls. The Xbox 360 aliases
+physical RAM into `0xA0000000..0xBFFFFFFF` (uncached) and `0x80000000..`
+(cached), which is almost certainly what the unexplained reads at
+`0xAD000010` and `0xAE010000` were: memory the game had asked for and never
+received.
+
+Now allocated from a bump region at `0xA0000000`, kept well clear of the
+`0x40000000` virtual heap so the two can never be confused in a log.
+
+**Still unexplained:** the read at `0x59000000`, immediately before the
+bugcheck. That is outside both the virtual heap and the physical alias
+window, so it may be a genuinely stray pointer rather than the same cause.
+Recorded as open rather than assumed solved.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*
