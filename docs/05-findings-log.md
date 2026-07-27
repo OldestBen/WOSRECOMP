@@ -736,6 +736,53 @@ the masks still cleared, so it trapped *again* inside the crash handler.
 All three reporting paths now call `RestoreHostFpState()` first. A diagnostic
 that can be killed by the condition it is diagnosing is not a diagnostic.
 
+## Guest filesystem layout, and the 2 GB allocation (2026-07-26)
+
+First successful file open:
+
+```
+[file] game root: C:/Users/benro/Downloads/wos
+[file] opened "D:\game_shared.ini" -> C:/Users/benro/Downloads/wos\game_shared.ini
+```
+
+**The game addresses its disc as `D:\`**, not `game:\` or
+`\Device\Harddisk0\...`. Stripping everything up to and including the first
+`:` and treating the remainder as relative to the game root is correct for
+this title.
+
+Confirmed disc layout (top level, from a real dump):
+
+| Entry | |
+|---|---|
+| `amalga.toc` | table of contents — almost certainly the archive index |
+| `game_shared.ini` | first file the game opens |
+| `packs/` | bulk game data |
+| `sound/` | audio |
+| `movies/` | Bink video (matches the `BINK`/`BINKDATA` sections in the XEX) |
+| `$SystemUpdate/` | title update, not needed |
+
+### The 2 GB allocation
+
+The sequence was: open `game_shared.ini`, ask its size, allocate a buffer,
+read, close. Step two was a stub that returned `STATUS_SUCCESS` and wrote
+**nothing** to its out-parameter, so the game read uninitialised guest memory
+as the size and got `0x82010000` — which is not a size at all, it is an
+address (the image base is `0x82000000`). It then asked for 2.03 GB, the
+allocator refused, and the config load failed.
+
+**A stub that reports success without filling in its out-parameter is worse
+than one that returns an error**, because the caller has no way to tell. Now
+implemented: `FileStandardInformation`, `FilePositionInformation`,
+`FileNetworkOpenInformation`, plus `NtReadFile` and `NtSetInformationFile`.
+
+### RtlRaiseException ×6 was never an error
+
+Exactly one raise per thread created read as six failures. It is not:
+**`0x406D1388` is the `SetThreadName` convention**, where the exception is
+merely a carrier for a name string a debugger is meant to intercept.
+`ExceptionInformation[1]` is the name pointer, `[2]` the thread id. Decoded
+now, so the trace prints thread names instead of six alarming lines.
+
 ## Explicit function boundary overrides
 
 Running log of `functions = [...]` entries added to the config and *why*

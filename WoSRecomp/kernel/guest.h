@@ -25,6 +25,19 @@ inline void StoreU32(uint8_t* base, uint32_t addr, uint32_t value)
     std::memcpy(base + addr, &v, sizeof(v));
 }
 
+inline uint64_t LoadU64(uint8_t* base, uint32_t addr)
+{
+    uint64_t v;
+    std::memcpy(&v, base + addr, sizeof(v));
+    return __builtin_bswap64(v);
+}
+
+inline void StoreU64(uint8_t* base, uint32_t addr, uint64_t value)
+{
+    const uint64_t v = __builtin_bswap64(value);
+    std::memcpy(base + addr, &v, sizeof(v));
+}
+
 inline uint16_t LoadU16(uint8_t* base, uint32_t addr)
 {
     uint16_t v;

@@ -64,6 +64,13 @@
 // ---------------------------------------------------------------------------
 #define WOS_IMPL_NtCreateFile 1
 #define WOS_IMPL_NtOpenFile 1
+// NtQueryInformationFile being a stub is what broke the previous run: the game
+// asked game_shared.ini its size, got nothing written back, read uninitialised
+// memory as the answer (0x82010000 — an address, not a size) and tried to
+// allocate 2 GB for the buffer.
+#define WOS_IMPL_NtQueryInformationFile 1
+#define WOS_IMPL_NtSetInformationFile 1
+#define WOS_IMPL_NtReadFile 1
 
 // ---------------------------------------------------------------------------
 // Thread-local storage — kernel/thread.cpp
@@ -83,6 +90,9 @@
 #define WOS_IMPL_RtlDeleteCriticalSection 1
 
 // ---------------------------------------------------------------------------
-// Strings — kernel/rtl.cpp
+// Strings and exceptions — kernel/rtl.cpp
 // ---------------------------------------------------------------------------
 #define WOS_IMPL_RtlInitAnsiString 1
+// Not an error path: 0x406D1388 is the SetThreadName convention, which is why
+// there was exactly one raise per thread created.
+#define WOS_IMPL_RtlRaiseException 1

@@ -70,6 +70,15 @@ struct MutantObject : KernelObject
     MutantObject() { type = "mutant"; }
 };
 
+void SignalEventIfAny(uint32_t handleOrPtr)
+{
+    if (handleOrPtr == 0)
+        return;
+    auto obj = ObjectFromAny(handleOrPtr);
+    if (auto* ev = dynamic_cast<EventObject*>(obj.get()))
+        ev->Set();
+}
+
 } // namespace wos
 
 namespace

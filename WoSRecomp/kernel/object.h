@@ -47,4 +47,8 @@ void CloseHandle(uint32_t handle);
 // How many objects are live, for the run summary.
 size_t LiveObjectCount();
 
+// Signal an event if the value names one; does nothing otherwise.
+// Used by the synchronous file reads to complete their "async" event.
+void SignalEventIfAny(uint32_t handleOrPtr);
+
 } // namespace wos
