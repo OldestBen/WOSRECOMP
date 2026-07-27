@@ -80,4 +80,14 @@ bool GuestCommit(uint8_t* base, uint32_t addr, uint32_t size);
 // its own host stack, so this names whatever that thread is actually doing.
 void PrintGuestStack(unsigned frames);
 
+// Register the calling thread so it can be backtraced later by any other
+// thread. Called by the main thread and by each ExCreateThread trampoline.
+void RegisterThreadForBacktrace(const char* label);
+
+// Suspend every registered thread except the caller and print its stack. This
+// is the only way to see a thread that is running guest code and calling no
+// imports at all — which is exactly the state that has been hardest to
+// diagnose.
+void DumpAllThreadStacks(unsigned frames);
+
 } // namespace wos

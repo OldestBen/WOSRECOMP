@@ -156,6 +156,12 @@ void GuestThreadMain(uint8_t* base, std::shared_ptr<wos::ThreadObject> self)
         self->threadId, self->entryPoint, self->stackBase, self->stackSize);
 
     t_guestThreadId = self->threadId;
+
+    char label[64];
+    snprintf(label, sizeof(label), "guest thread %u (entry 0x%08X)",
+        self->threadId, self->entryPoint);
+    wos::RegisterThreadForBacktrace(label);
+
     self->started = true;
     ++g_liveGuestThreads;
 

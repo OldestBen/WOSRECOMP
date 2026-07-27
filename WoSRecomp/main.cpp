@@ -195,6 +195,28 @@ std::atomic<uint64_t> g_autoCommitCount{0};
 std::atomic<uint64_t> g_stackCommitBytes{0};
 bool g_autoCommit = true;
 
+// Every guest-executing thread, so any of them can be backtraced on demand.
+//
+// CaptureStackBackTrace only ever walks the *calling* thread, which has been a
+// real limitation: twice now a diagnostic has named a thread by inference and
+// been wrong. Suspending a thread and walking its stack answers the question
+// directly instead.
+std::mutex g_threadRegistryMutex;
+std::vector<std::pair<HANDLE, std::string>> g_threadRegistry;
+
+void RegisterGuestThreadForBacktrace(const char* label)
+{
+    HANDLE dup = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                         GetCurrentProcess(), &dup, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_threadRegistryMutex);
+    g_threadRegistry.emplace_back(dup, label);
+}
+
 // Name the recompiled functions currently on the host stack.
 //
 // Recompiled guest functions are ordinary C++ functions called normally, so
@@ -231,6 +253,92 @@ void PrintGuestBacktrace(unsigned frameCount = 40)
             printf("  #%-3u %s +0x%llX\n", i, sym->Name, (unsigned long long)disp);
         else
             printf("  #%-3u %p  (no symbol)\n", i, frames[i]);
+    }
+
+    SymCleanup(proc);
+}
+
+// Walk one suspended thread's stack and symbolise it.
+//
+// StackWalk64 rather than CaptureStackBackTrace, because the target is another
+// thread: it needs an explicit CONTEXT, which only makes sense while the
+// thread is stopped.
+void BacktraceSuspendedThread(HANDLE thread, const char* label, unsigned maxFrames)
+{
+    printf("  --- %s ---\n", label);
+
+    if (SuspendThread(thread) == DWORD(-1))
+    {
+        printf("    (could not suspend)\n");
+        return;
+    }
+
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_FULL;
+
+    if (!GetThreadContext(thread, &context))
+    {
+        printf("    (could not read context)\n");
+        ResumeThread(thread);
+        return;
+    }
+
+    STACKFRAME64 frame{};
+    frame.AddrPC.Offset = context.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = context.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = context.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+
+    const HANDLE proc = GetCurrentProcess();
+
+    alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+    auto* sym = reinterpret_cast<SYMBOL_INFO*>(buffer);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = MAX_SYM_NAME;
+
+    for (unsigned i = 0; i < maxFrames; ++i)
+    {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thread, &frame, &context,
+                         nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr))
+        {
+            break;
+        }
+        if (frame.AddrPC.Offset == 0)
+            break;
+
+        DWORD64 disp = 0;
+        if (SymFromAddr(proc, frame.AddrPC.Offset, &disp, sym))
+            printf("    #%-3u %s +0x%llX\n", i, sym->Name, (unsigned long long)disp);
+        else
+            printf("    #%-3u 0x%llX  (no symbol)\n", i,
+                (unsigned long long)frame.AddrPC.Offset);
+    }
+
+    ResumeThread(thread);
+}
+
+// Backtrace every registered guest thread except the caller.
+void DumpAllGuestThreadStacks(unsigned maxFrames)
+{
+    const HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+    SymInitialize(proc, nullptr, TRUE);
+
+    const DWORD self = GetCurrentThreadId();
+
+    std::lock_guard<std::mutex> lock(g_threadRegistryMutex);
+    printf("\n=== all guest thread stacks (%zu) ===\n", g_threadRegistry.size());
+
+    for (auto& [handle, label] : g_threadRegistry)
+    {
+        if (GetThreadId(handle) == self)
+        {
+            printf("  --- %s (this thread, skipped) ---\n", label.c_str());
+            continue;
+        }
+        BacktraceSuspendedThread(handle, label.c_str(), maxFrames);
     }
 
     SymCleanup(proc);
@@ -432,6 +540,25 @@ LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
 // everything worth knowing, then stop the process where it stands.
 namespace wos
 {
+void RegisterThreadForBacktrace(const char* label)
+{
+#ifdef _WIN32
+    RegisterGuestThreadForBacktrace(label);
+#else
+    (void)label;
+#endif
+}
+
+void DumpAllThreadStacks(unsigned frames)
+{
+#ifdef _WIN32
+    RestoreHostFpState();
+    DumpAllGuestThreadStacks(frames);
+#else
+    (void)frames;
+#endif
+}
+
 void PrintGuestStack(unsigned frames)
 {
 #ifdef _WIN32
@@ -680,9 +807,13 @@ int main(int argc, char** argv)
     // prints on *first* call, so a steady state prints nothing at all. This
     // reports what changed since the last tick, which answers the only
     // question that matters: is it doing work, or spinning?
+    wos::RegisterThreadForBacktrace("main thread");
+
     std::thread([]
     {
         auto previous = wos::SnapshotImportCounts();
+        int quietTicks = 0;
+        bool dumped = false;
 
         for (;;)
         {
@@ -724,6 +855,26 @@ int main(int argc, char** argv)
             }
 
             wos::ReportWaitActivity();
+
+            // "Busy" here means *new* imports appearing, not calls happening.
+            // A game polling the same three waits forever is not progressing,
+            // and after a while the only remaining question is what each
+            // thread is actually executing.
+            if (current.size() == previous.size())
+                ++quietTicks;
+            else
+                quietTicks = 0;
+
+            if (quietTicks == 3 && !dumped)
+            {
+                dumped = true;
+                printf("\n[watchdog] no new imports for 15 s — dumping every "
+                       "thread's stack.\nThis is the only way to see a thread "
+                       "running guest code that calls nothing.\n");
+                wos::DumpAllThreadStacks(16);
+                printf("=== end of thread stacks ===\n\n");
+            }
+
             previous = std::move(current);
         }
     }).detach();

@@ -40,9 +40,11 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
   worked: `ev5`/`ev6` were adopted at the two graphics threads' `ctx+0x20`.
   **Everything is now quiescent: every thread waits, nothing signals.** The
   blocked waiter is a *spawned* thread, not the main thread (backtrace
-  correction — see log). The main thread makes **no import calls at all** and
-  is therefore invisible; critical sections now detect and report a blocked
-  entry, which is where an invisible thread would be. **Not yet run.**
+  correction — see log). **The main thread makes no import calls at all and is
+  not blocked on a lock either** — the critical-section watchdog stayed
+  silent, ruling that out. It is executing guest code. A watchdog now suspends
+  and backtraces *every* thread after 15 s of no new imports, which is the
+  only way to observe a thread that calls nothing. **Not yet run.**
 - **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
   disc, or a `private/game/` directory. Guest paths look like
   `D:\game_shared.ini`; the resolver strips the device prefix and treats the
@@ -112,6 +114,32 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 ---
 
 ## Log
+
+### 2026-07-26 (19) — Deadlock ruled out; a watchdog that backtraces every thread
+
+- **No `[lock]` warning fired.** The critical-section deadlock hypothesis is
+  wrong: the main thread is not blocked on a lock. A clean negative result,
+  and worth as much as a positive one — it eliminates my own synchronisation
+  code as the cause.
+- So the main thread is **executing guest code while calling no imports at
+  all**. Nothing in the existing instrumentation can see that: the import
+  trace, the heartbeat and the wait statistics are all keyed on imports.
+- **Stopped guessing and built the general tool instead.** I have now
+  inferred this thread's location twice and been wrong once, so:
+  `DumpAllThreadStacks` registers every guest-executing thread (main plus
+  each `ExCreateThread` trampoline) and, on demand, suspends each one,
+  captures its `CONTEXT`, walks it with `StackWalk64` and symbolises the
+  result.
+- `CaptureStackBackTrace` cannot do this — it only ever walks the *calling*
+  thread, which is precisely why the earlier diagnostics could describe the
+  waiters and never the one thread that mattered.
+- A watchdog fires it automatically after **three consecutive heartbeats with
+  no new imports** (15 s). "Busy" is deliberately defined as *new imports
+  appearing*, not calls happening: a game polling the same three waits
+  forever is not progressing, whatever the call rate says.
+- This generalises beyond the current question. Any future hang — a worker
+  stuck mid-job, a thread lost in mis-recompiled control flow — now names
+  itself without another round of instrumentation.
 
 ### 2026-07-26 (18) — Backtrace corrects me; hunting the invisible main thread
 
