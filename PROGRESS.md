@@ -115,6 +115,28 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Log
 
+### 2026-07-26 (20) — Build broke on MSVC only; stale-binary trap closed
+
+- **`main.cpp` failed to compile on Windows**: `no type named 'mutex' in
+  namespace 'std'`. The thread registry used `std::mutex` without including
+  `<mutex>`.
+- **My cross-compile check did not catch it, and that is the real finding.**
+  libstdc++ pulls `<mutex>` in transitively via `<thread>`; MSVC's STL does
+  not. Every syntax check this session has been "clean on Linux and mingw",
+  and for *transitive includes* that guarantee is worth less than it looks.
+- Added an **include-what-you-use audit** over `WoSRecomp/**` that maps each
+  `std::` facility used to the header that must be included (following one
+  level of our own headers). It reports clean now, and unlike the compilers
+  it does not depend on which STL happens to be in use.
+- **The run that followed the failed build used the previous binary.** The
+  chained `build && run` printed a compile error, then produced output that
+  looked like a perfectly normal result from new code — no watchdog lines,
+  because the watchdog was not in that executable. Nothing about the run
+  output said "this is stale".
+- `build_host.sh` now deletes the executable *before* building. A failed
+  build leaves nothing to run, so a stale binary cannot masquerade as a
+  result. Cheap, and it removes a whole category of wasted round trip.
+
 ### 2026-07-26 (19) — Deadlock ruled out; a watchdog that backtraces every thread
 
 - **No `[lock]` warning fired.** The critical-section deadlock hypothesis is

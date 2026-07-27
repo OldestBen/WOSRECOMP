@@ -29,8 +29,10 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <file.h>

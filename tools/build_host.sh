@@ -94,6 +94,15 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
     ${TOOLCHAIN_ARGS[@]+"${TOOLCHAIN_ARGS[@]}"} || exit 1
 
 echo "==> Building"
+# Delete the previous executable first.
+#
+# Otherwise a failed build leaves the old binary sitting there, and anyone
+# running the build and the game as one chained command silently gets the
+# *previous* build's behaviour. That happened: a compile error scrolled past
+# and the run that followed looked like a normal result from new code.
+find "$BUILD_DIR" -name 'WoSRecomp' -o -name 'WoSRecomp.exe' 2>/dev/null \
+    | while read -r stale; do rm -f "$stale"; done
+
 BUILD_LOG="$(mktemp)"
 cmake --build "$BUILD_DIR" --config RelWithDebInfo -j "$JOBS" 2>&1 | tee "$BUILD_LOG"
 RC="${PIPESTATUS[0]}"
