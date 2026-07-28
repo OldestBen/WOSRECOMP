@@ -18,7 +18,24 @@ std::mutex g_mutex;
 // Insertion-ordered, so the trace reflects the boot sequence rather than
 // alphabetical order. First-call order is the interesting signal.
 std::vector<const char*> g_order;
-std::unordered_map<std::string, uint64_t> g_counts;
+
+// Keyed by the literal's ADDRESS, not its text.
+//
+// Every WOS_IMPORT_STUB call site passes a string literal, and each import
+// name appears exactly once in the binary — the WOS_IMPL_ guards make sure a
+// name is either a generated stub or a kernel implementation, never both. So
+// the pointer is a stable unique key, and using it removes a std::string
+// construction and a string hash from a path taken tens of millions of times
+// during startup.
+//
+// That matters beyond speed: this runs under a global mutex on every import
+// call from every guest thread, and stack dumps repeatedly caught threads
+// inside `operator new` here. Measurement apparatus that serialises the thing
+// it measures is not measuring the thing.
+//
+// If the assumption ever breaks, the symptom is benign and visible: the same
+// name appearing twice in the import list.
+std::unordered_map<const char*, uint64_t> g_counts;
 
 // Bounded on purpose: the key includes a guest-controlled address, and this is
 // reached from paths running millions of times a second.

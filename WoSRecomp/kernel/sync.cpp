@@ -63,11 +63,20 @@ struct EventObject : KernelObject
     std::atomic<uint64_t> signals{0};
     int index = 0;              // creation order, for readable reporting
 
+    // Guest call sites for the object's lifecycle. An event that is waited on
+    // and never set is only half a diagnosis — the other half is who was
+    // supposed to set it, and the creation site is the thread that owns the
+    // protocol. Both are ctx.lr at the relevant call, so they cost nothing.
+    uint32_t createSite = 0;
+    std::atomic<uint32_t> lastSetSite{0};
+
     EventObject() { type = "event"; }
 
-    void Set()
+    void Set(uint32_t site = 0)
     {
         signals.fetch_add(1, std::memory_order_relaxed);
+        if (site != 0)
+            lastSetSite.store(site, std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lock(m);
             signalled = true;
@@ -227,7 +236,8 @@ void ReportWaitSites()
 
 void ReportWaitActivity()
 {
-    struct Row { int index; uint32_t ptr; uint64_t waits, timeouts, signals; bool manual; };
+    struct Row { int index; uint32_t handle; uint32_t ptr; uint64_t waits, timeouts, signals;
+                 bool manual; uint32_t createSite; uint32_t setSite; };
     std::vector<Row> rows;
 
     {
@@ -239,19 +249,17 @@ void ReportWaitActivity()
                 const uint64_t w = ev->waits.load(std::memory_order_relaxed);
                 if (w == 0)
                     continue;
-                rows.push_back({ ev->index, ev->guestPtr, w,
+                rows.push_back({ ev->index, ev->handle, ev->guestPtr, w,
                                  ev->timeouts.load(std::memory_order_relaxed),
                                  ev->signals.load(std::memory_order_relaxed),
-                                 ev->manualReset });
+                                 ev->manualReset, ev->createSite,
+                                 ev->lastSetSite.load(std::memory_order_relaxed) });
             }
         }
     }
 
     if (rows.empty())
     {
-        // Call sites are recorded even for objects that are not EventObjects
-        // (mutants, adopted-then-freed blocks), so this half of the report can
-        // have something to say when the other half does not.
         ReportWaitSites();
         return;
     }
@@ -259,18 +267,25 @@ void ReportWaitActivity()
     std::sort(rows.begin(), rows.end(),
         [](const Row& a, const Row& b) { return a.waits > b.waits; });
 
-    printf("[waits]");
-    for (size_t i = 0; i < rows.size() && i < 5; ++i)
+    // Every event that has been waited on, not the busiest handful. The ones
+    // that matter are precisely the quiet ones — an event waited on once and
+    // never signalled is a deadlock, and it sorts last by every measure that
+    // was being used to truncate this list.
+    printf("[waits] %zu event(s) waited on  [waits/timeouts/signals]:\n", rows.size());
+    for (const auto& r : rows)
     {
-        // "waits/timeouts/signals" — an object with waits ~= timeouts and
-        // zero signals is being waited on by someone nothing ever wakes.
-        printf("  ev%d(%s) %llu/%llu/%llu", rows[i].index,
-            rows[i].manual ? "manual" : "auto",
-            (unsigned long long)rows[i].waits,
-            (unsigned long long)rows[i].timeouts,
-            (unsigned long long)rows[i].signals);
+        printf("    ev%-2d handle 0x%08X ptr 0x%08X %-7s %llu/%llu/%llu",
+            r.index, r.handle, r.ptr, r.manual ? "manual" : "auto",
+            (unsigned long long)r.waits, (unsigned long long)r.timeouts,
+            (unsigned long long)r.signals);
+        if (r.createSite != 0)
+            printf("  created bl@0x%08X", r.createSite - 4);
+        if (r.setSite != 0)
+            printf("  last set bl@0x%08X", r.setSite - 4);
+        else if (r.signals == 0)
+            printf("  NEVER SET BY ANYONE");
+        printf("\n");
     }
-    printf("   [waits/timeouts/signals]\n");
 
     ReportWaitSites();
 }
@@ -326,6 +341,7 @@ PPC_FUNC(__imp__NtCreateEvent)
     auto ev = std::make_shared<wos::EventObject>();
     ev->manualReset = (eventType == 0);
     ev->signalled = (initialState != 0);
+    ev->createSite = uint32_t(ctx.lr);
 
     {
         std::lock_guard<std::mutex> lock(wos::g_eventListMutex);
@@ -355,7 +371,7 @@ PPC_FUNC(__imp__NtSetEvent)
     auto obj = wos::ObjectFromAny(ctx.r3.u32);
     if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
     {
-        ev->Set();
+        ev->Set(uint32_t(ctx.lr));
         ctx.r3.u64 = wos::kStatusSuccess;
     }
     else
@@ -783,7 +799,7 @@ PPC_FUNC(__imp__KeSetEvent)
     if (ev != nullptr)
     {
         const uint32_t previous = ev->signalled ? 1u : 0u;
-        ev->Set();
+        ev->Set(uint32_t(ctx.lr));
         ctx.r3.u64 = previous;
     }
     else

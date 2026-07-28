@@ -1894,6 +1894,61 @@ Both appear right after `KeInitializeSemaphore`, and there is no semaphore
 object type in object.cpp at all. A wait on a semaphore that returns success
 without waiting is the same class of bug as the original wait stubs.
 
+## The two blocked threads are waiting on five events nobody signals
+
+2026-07-28, run 20260728-143518. The report finally fires, and it is clean:
+
+    NtWaitForMultipleObjectsEx: none of 3 object(s) signalled in 5s (INFINITE)
+      [0] handle 0x00010050 -> event
+      [1] handle 0x00010048 -> event
+      [2] handle 0x0001004C -> event
+      in sub_82B16CC8 <- sub_82A7CD00
+
+    NtWaitForMultipleObjectsEx: none of 2 object(s) signalled in 5s (INFINITE)
+      [0] handle 0x00010024 -> event
+      [1] handle 0x00010030 -> event
+      in sub_82B16CC8 <- sub_829677D0
+
+All five resolve as real events, so this is not a missing object type and not
+a handle-mapping failure — the two hypotheses that would have been next. They
+exist, they are waited on, and nothing ever sets them, while ev0 and ev1 take
+about 1,600 signals each over the same period.
+
+Note the timeouts really are INFINITE here. The previous entry inferred from
+the stack that they were finite; that was reading a `wait_until` symbol and
+concluding too much, since the rewritten loop uses `wait_until` on both paths.
+The census rows were misleading for the reason already recorded, but the
+conclusion drawn from the stack was wrong on its own terms.
+
+**What is instrumented next.** An event that is waited on and never set is
+half a diagnosis; the other half is who was supposed to set it. EventObject now
+records the guest call site of its creation (`ctx.lr` at NtCreateEvent) and of
+its last successful Set, and the report lists **every** event rather than the
+busiest five — the ones that matter are precisely the quiet ones, and they
+sorted last under every ordering the truncated list used. An event with no set
+site prints `NEVER SET BY ANYONE`.
+
+Between the creation site and the absence of a set site, the next run should
+say which guest function owns the protocol these five belong to.
+
+## The import log no longer allocates on every call
+
+2026-07-28. Stack dumps kept catching guest threads inside `operator new` and
+`Mtx_lock` in `LogImportCall`. It keyed an `unordered_map<std::string,...>` by
+a name constructed from a `const char*` on every single import call, under a
+global mutex, across every guest thread — tens of millions of times during
+startup.
+
+Now keyed by the literal's address. Each WOS_IMPORT_STUB site passes a string
+literal and each import name appears exactly once in the binary (the WOS_IMPL_
+guards make a name either a generated stub or a kernel implementation, never
+both), so the pointer is a stable unique key. If that ever breaks the symptom
+is benign and obvious: a name appearing twice in the import list.
+
+Worth doing for correctness, not only speed — apparatus that serialises every
+guest thread through one lock and one allocator is not measuring the system it
+is attached to.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
