@@ -28,59 +28,87 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **BOOTS, RUNS A STEADY RENDER LOOP, AND LOADS ASSETS.** 79
+- **Stage:** **BOOTS, RUNS A STEADY RENDER LOOP, LOADS SOME ASSETS.** 79
   imports reached, 76 implemented. Twelve threads. The command processor
-  consumes the ring continuously with the GPU fence tracking the CPU fence
-  four behind, and the game's own D3D layer is satisfied — no hang report.
-  **Nothing is drawn: there is no renderer and no window.**
-- **Asset loading works, partially.** `game_shared.ini`, `amalga.toc` and
-  774 KB out of `SOUNDSRC_RVB.PCK` all load. `game.XEPACK` still stops after
-  a single 0x80000 read.
-- **Two threads block forever** waiting on five events nobody signals:
-  `sub_829677D0` (the "Game Master") on handles 0x00010024/0x00010030, and
-  `sub_82A7CD00` on 0x00010048/0x0001004C/0x00010050. Every event in the game
-  is created at guest `0x82B16368` and set from guest `0x82B16C58`; the setter
-  runs constantly (4,400+ signals on other events) and is simply never called
-  with these five. **A producer that never produces, not a broken primitive.**
-  Reading `sub_829677D0` is the next step.
-- **The ring size encoding is unconfirmed.** `VdInitializeRingBuffer` is
-  given a raw argument of 0xE; a modelled 0x4000 dwords is too small, since
-  the write pointer passes it without wrapping. The capacity now grows and
-  reports rather than refusing to consume, because refusing is what made the
-  game declare the GPU hung. The next wrap settles the encoding.
-- **Corrected along the way:** the main thread was never deadlocked (it runs
-  a wraparound-safe fence wait that completes continuously), the GPU fence
-  never froze (a log line was capped at twelve), and there is no `Sleep()`
-  spin (the call-site counter is frozen after startup). Each of those was
-  believed and recorded before being measured.
+  consumes the ring continuously, the GPU fence tracks the CPU fence four
+  behind, and the game's own D3D layer is satisfied — no hang report, runs for
+  minutes. **Nothing is drawn: there is no renderer and no window.**
+- **One blocker, precisely located.** Two threads — `sub_829677D0` (the game's
+  own "Game Master") and `sub_82A7CD00` — wait forever on five events that
+  nothing ever signals. The whole chain is mapped: every event is created at
+  guest `0x82B16368` and set from `0x82B16C58`; the only code that would
+  signal these five is five instructions at `0x82965534`, guarded by two
+  branches at `0x829654F8`/`0x82965504`, reached from a request-completion
+  function at `0x82965488` with four callers, none of which has ever appeared
+  on a stack. The request objects stay in state 1 instead of moving to 3.
+- **The asynchronous read is understood and is not the fix.** `game.XEPACK` is
+  read once with a completion APC that we were dropping. It is now delivered,
+  on the issuing thread, at the correct point (queued, drained at the next
+  wait). It changes nothing. Next measurement is a tripwire on the real
+  completion, `sub_82968498`.
+- **Asset loading works as far as it gets:** `game_shared.ini`, `amalga.toc`
+  and 774 KB of `SOUNDSRC_RVB.PCK` all load correctly.
+- **The ring size encoding is still unconfirmed.** The raw argument is 0xE; a
+  modelled 0x4000 dwords is too small, the capacity grows once to 0x8000 and
+  is clamped at the allocation edge. No wrap has been observed, which is what
+  would settle it.
 
 Full evidence for each of these is in
 [`docs/05-findings-log.md`](docs/05-findings-log.md).
 
 ## Next Steps (in order)
 
-1. ~~Recompile, compile, link, run~~ **DONE** — the game executes, boots into
-   its CRT, spawns six threads and reads from the disc.
-2. **Keep following the import trace.** It is a queue, not a checklist: the
-   game cannot ask for anything new until what it already asked for works.
-   Each round implements the next few and the trace grows.
-3. **Read the next run's `[waitsites]` block and tripwire lines.** They
-   decide whether the present path is unreached or reached-and-bailing, which
-   are different bugs with different fixes.
-4. **Archive loading** is the near-term milestone — `amalga.toc` plus
-   `packs/` is where the actual game data lives, so directory enumeration
-   and larger reads come next.
-5. Decide whether to revisit the 33 known-bad switch sites. They compile but
-   emit wrong control flow, and now that code genuinely runs they can cause
-   misbehaviour that looks like a logic bug. See the alignment analysis in
-   the findings log.
-6. Locate `setjmp`/`longjmp` (look for `RtlUnwind` callers) if error-path
-   control flow misbehaves.
-7. Then the big one: GPU via XenosRecomp, plus audio, input and UI.
+1. **Tripwire `sub_82968498`** — the I/O completion the APC chain leads to.
+   Establish whether it runs, and what it does with the request object. This
+   is the one remaining unknown in a fully-mapped deadlock.
+2. **Then the rest of asset loading.** `game.XEPACK` past its first 0x80000,
+   plus whatever the unblocked loader threads ask for next. Expect the import
+   count to move past 76 for the first time in a dozen runs.
+3. **Checkpoint here.** A game that boots, streams its assets and drives a
+   coherent command stream is the right foundation to start a renderer
+   against, and it is a different thing from where this was.
+4. **Then the big one: the renderer.** Host backend, PM4 command translation,
+   shader recompilation via XenosRecomp, vertex/texture formats, EDRAM and
+   resolves. This is the majority of the remaining work by a wide margin.
+5. Input, then audio.
+6. Revisit the 33 known-bad switch sites; locate `setjmp`/`longjmp` if error
+   paths misbehave.
 
 ---
 
 ## Log
+
+### 2026-07-28 (25) — The deadlock fully mapped; graphics detour corrected
+
+The session's real output is a diagnosis, not a fix. Two threads block on five
+events nobody signals, and the entire chain is now known by measurement:
+creation site, set site, the five instructions that would signal, the two
+branches guarding them, and the completion function upstream. What is not yet
+known is why that completion never runs.
+
+**Corrections that cost the most time, recorded because the pattern repeated:**
+
+- The main thread was never deadlocked. It runs a wraparound-safe fence wait
+  that completes continuously; it merely spends most of its time there.
+- The GPU fence never froze. A log line was capped at twelve occurrences and
+  the silence read as the fence stopping.
+- There is no `Sleep()` spin. The call-site counter is frozen after startup.
+- Three separate times an instrumentation gap read as a result — a capped log
+  line, a function-scope `static bool`, and a report on the wrong side of a
+  branch. Same shape each time: absence of output taken as absence of the
+  condition. Every self-suppressing diagnostic now announces its suppression.
+
+**Real fixes this session:** the string conversions (first bulk asset load),
+proper WaitAny (the "first object only" shortcut was a permanent block), the
+adaptive ring capacity (a refusal to consume was making the game declare the
+GPU hung), and completion-APC delivery.
+
+**Tooling:** `--field` finds who touches a struct field, with `--context N` to
+show the value each store writes — the question `--xrefs` structurally cannot
+answer. `LogCallSite` attributes any hot import to its guest call site.
+Guest-function tripwires observe that control reached an address whose code
+calls no imports. The event report now lists every event with its creation and
+last-set call sites.
 
 ### 2026-07-28 (24) — Asset loading unblocked; the GPU hang was ours
 

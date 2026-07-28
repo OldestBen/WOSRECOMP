@@ -2142,6 +2142,29 @@ The queue is swapped out before iterating, because a completion routine may
 issue another read and queue a further APC — appending to the vector being
 walked would be a use-after-realloc. The new one goes out at the next wait.
 
+## Deferred APC delivery works and still does not unblock it
+
+2026-07-28, run 20260728-184536. The ordering is now correct — the delivery
+line falls after the read rather than before it:
+
+    [file] read 524288 of 0x80000 bytes from "D:\packs\game.XEPACK"
+    [file] delivering queued APC 0x82B16659 -> 0x82B16658, context 0x829688C0
+
+Everything else is unchanged. ev2/ev4/ev7/ev8/ev9 still NEVER SET BY ANYONE,
+imports still 76, one read, both threads blocked.
+
+So the APC hypothesis is spent as an explanation, though not as machinery: the
+game does pass a completion routine, it is now delivered on the issuing thread
+at the correct point, and none of that produces a signal. Two rounds on the
+delivery mechanism, both negative.
+
+**Stopping the mechanism work here.** The next measurement is a tripwire on
+sub_82968498 — the function 0x829688C0 actually calls, the real completion —
+to establish whether it runs at all and what it does with the request object.
+Continuing to adjust delivery around a completion that has never been observed
+executing is the same mistake as the graphics detour: refining a mechanism
+instead of confirming the thing it feeds.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
