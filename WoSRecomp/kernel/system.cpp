@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdio>
 #include <mutex>
+#include <thread>
 
 namespace
 {
@@ -31,7 +32,13 @@ constexpr uint32_t kTotalPhysicalPages = uint32_t(kTotalPhysicalBytes / kPageSiz
 // them well away from the 0x40000000 virtual heap means a stray pointer from
 // one region can never be mistaken for the other while reading a log.
 constexpr uint32_t kPhysicalBase = 0xA0000000u;
-constexpr uint32_t kPhysicalEnd  = 0xB0000000u;
+// The console's uncached physical alias is 0xA0000000..0xBFFFFFFF — the full
+// 512 MiB of unified memory. Stopping at 0xB0000000 modelled a 256 MiB machine
+// and refused a 0x12160000 (290 MiB) request during archive loading, which the
+// game handled by falling back to a smaller allocation rather than failing
+// loudly. That is the kind of shortfall that surfaces much later as missing
+// content, so size the window to the hardware.
+constexpr uint32_t kPhysicalEnd  = 0xC0000000u;
 
 std::mutex g_physMutex;
 uint32_t g_physNext = kPhysicalBase;
@@ -228,5 +235,50 @@ PPC_FUNC(__imp__KeGetCurrentProcessType)
     WOS_IMPORT_STUB("KeGetCurrentProcessType");
     // 0 = idle, 1 = user (title), 2 = system. We are the title.
     ctx.r3.u64 = 1;
+}
+#endif
+
+#ifdef WOS_IMPL_KeDelayExecutionThread
+// NTSTATUS KeDelayExecutionThread(KPROCESSOR_MODE mode, BOOLEAN alertable,
+//                                 PLARGE_INTEGER interval);
+//   r3 = mode, r4 = alertable, r5 = interval
+//
+// This was an unimplemented stub, so it returned instantly — and a run logged
+// 45,304,664 calls in five seconds. Every Sleep() in the game was a no-op,
+// which turned its retry loops into busy-waits burning a core and made the
+// import histogram useless (one entry drowning out everything else).
+//
+// The interval is a LARGE_INTEGER in 100 ns units: negative means relative,
+// which is what a sleep uses. Positive means an absolute time, and since this
+// runtime has no meaningful absolute system clock to wait against, that case
+// yields rather than inventing a deadline.
+PPC_FUNC(__imp__KeDelayExecutionThread)
+{
+    WOS_IMPORT_STUB("KeDelayExecutionThread");
+
+    const uint32_t intervalPtr = ctx.r5.u32;
+    if (intervalPtr == 0)
+    {
+        std::this_thread::yield();
+        ctx.r3.u64 = wos::kStatusSuccess;
+        return;
+    }
+
+    const int64_t interval = static_cast<int64_t>(wos::LoadU64(base, intervalPtr));
+    if (interval < 0)
+    {
+        // Relative. A zero-length relative wait is a yield, not a sleep.
+        const int64_t hundredNs = -interval;
+        if (hundredNs == 0)
+            std::this_thread::yield();
+        else
+            std::this_thread::sleep_for(std::chrono::nanoseconds(hundredNs * 100));
+    }
+    else
+    {
+        std::this_thread::yield();
+    }
+
+    ctx.r3.u64 = wos::kStatusSuccess;
 }
 #endif

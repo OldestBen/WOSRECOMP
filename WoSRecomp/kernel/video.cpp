@@ -162,6 +162,110 @@ void ReportRingProgress(uint8_t* base, uint32_t rptrPtr)
     s_first = false;
 }
 
+// Walk the ring buffer as PM4 packets and report what is in it.
+//
+// The encoding is now established rather than assumed. The first dump gave:
+//
+//     +0000: C0114800 000003FF 00000000 ... (18 payload dwords)
+//     +004C: C0013F00 009C0140 0000000B
+//     +0058: C0013F00 00940100 00000040
+//
+// Reading the header as [31:30] type, [29:16] count-1, [15:8] opcode predicts
+// the next packet starts at +0x4C, and it does — a type-3 header sits exactly
+// there. That arithmetic checking out twice in a row is what makes this a
+// decode rather than a guess.
+//
+// Opcode 0x3F is an indirect buffer: address then dword count. Both addresses
+// land inside physical allocations the game made, once put through the
+// 0xA0000000 alias. So the ring is nearly empty by design and the actual
+// commands — including whatever advances the GPU fence — live in the buffers
+// it points at. Hence the recursion.
+//
+// This only reports. Executing the packets is the next step, and it needs to
+// know which opcode carries the fence write, which is precisely what this
+// prints.
+constexpr uint32_t kPm4IndirectBuffer = 0x3F;
+
+void WalkPackets(uint8_t* base, uint32_t bufferVirtual, uint32_t dwordCount,
+                 unsigned depth, unsigned& budget)
+{
+    const char* indent = (depth == 0) ? "" : "    ";
+
+    for (uint32_t i = 0; i < dwordCount && budget > 0; )
+    {
+        const uint32_t header = wos::LoadU32(base, bufferVirtual + i * 4);
+        const uint32_t type = header >> 30;
+
+        // Type 2 is a single-dword filler used to pad to the end of the ring;
+        // it has no count field, so treating it like the others desyncs the
+        // walk and turns everything after it into noise.
+        if (type == 2)
+        {
+            ++i;
+            continue;
+        }
+
+        const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
+
+        if (type == 3)
+        {
+            const uint32_t opcode = (header >> 8) & 0x7F;
+            --budget;
+            printf("[gpu] %s+%04X type3 op=0x%02X count=%u:", indent, i * 4, opcode, count);
+            for (uint32_t j = 1; j <= count && j <= 6 && i + j < dwordCount; ++j)
+                printf(" %08X", wos::LoadU32(base, bufferVirtual + (i + j) * 4));
+            if (count > 6)
+                printf(" ...");
+            printf("\n");
+
+            if (opcode == kPm4IndirectBuffer && count >= 2 && depth < 2)
+            {
+                const uint32_t ibPhysical = wos::LoadU32(base, bufferVirtual + (i + 1) * 4);
+                const uint32_t ibWords = wos::LoadU32(base, bufferVirtual + (i + 2) * 4);
+                const uint32_t ibVirtual = PhysicalToVirtual(ibPhysical);
+                printf("[gpu] %s  -> indirect buffer physical 0x%08X (virtual 0x%08X), %u dword(s)\n",
+                    indent, ibPhysical, ibVirtual, ibWords);
+                if (ibVirtual != 0 && ibWords > 0 && ibWords < 0x10000)
+                    WalkPackets(base, ibVirtual, ibWords, depth + 1, budget);
+            }
+        }
+        else if (type == 0)
+        {
+            --budget;
+            printf("[gpu] %s+%04X type0 reg=0x%04X count=%u\n",
+                indent, i * 4, header & 0x7FFF, count);
+        }
+        else
+        {
+            --budget;
+            printf("[gpu] %s+%04X type%u header=%08X\n", indent, i * 4, type, header);
+        }
+
+        i += count + 1;
+    }
+}
+
+// Report the ring once, following indirect buffers. One-shot: the first
+// submission is the interesting one and a per-frame dump would bury it.
+void DumpPacketsOnce(uint8_t* base, uint32_t wptr)
+{
+    static bool s_done = false;
+    if (s_done)
+        return;
+
+    const uint32_t ring = g_ringVirtual.load(std::memory_order_relaxed);
+    const uint32_t size = g_ringSize.load(std::memory_order_relaxed);
+    if (ring == 0 || size == 0 || wptr == 0)
+        return;
+
+    s_done = true;
+
+    printf("[gpu] === packet walk from ring virtual 0x%08X, %u dword(s) ===\n", ring, wptr);
+    unsigned budget = 64;   // bound the output; the boot submission is small
+    WalkPackets(base, ring, std::min<uint32_t>(wptr, size / 4), 0, budget);
+    printf("[gpu] === end of packet walk ===\n");
+}
+
 // Dump the command packets the game has actually written into the ring.
 //
 // The remaining problem is the GPU fence. The game's hang dump reports:
@@ -250,6 +354,7 @@ void VblankThread(uint8_t* base)
 
         ReportRingProgress(base, rptrPtr);
         DumpRingOnce(base, wptr);
+        DumpPacketsOnce(base, wptr);
 
         const uint32_t callback = g_interruptCallback.load(std::memory_order_relaxed);
         if (callback == 0)

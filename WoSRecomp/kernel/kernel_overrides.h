@@ -43,6 +43,7 @@
 #define WOS_IMPL_KeQuerySystemTime 1
 #define WOS_IMPL_KeQueryPerformanceFrequency 1
 #define WOS_IMPL_KeGetCurrentProcessType 1
+#define WOS_IMPL_KeDelayExecutionThread 1
 
 // ---------------------------------------------------------------------------
 // Kernel objects, events, mutants — kernel/sync.cpp
