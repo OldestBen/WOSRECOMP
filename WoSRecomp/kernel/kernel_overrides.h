@@ -160,3 +160,9 @@
 #define WOS_IMPL_OutputDebugStringA 1
 #define WOS_IMPL__vsnprintf 1
 #define WOS_IMPL_sprintf 1
+
+// ---------------------------------------------------------------------------
+// String conversion — kernel/rtl.cpp
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_RtlMultiByteToUnicodeN 1
+#define WOS_IMPL_RtlUnicodeToMultiByteN 1

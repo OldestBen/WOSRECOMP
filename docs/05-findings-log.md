@@ -1534,6 +1534,73 @@ the graphics thread. The graphics-thread path is a secondary, deferred present
 gated on a flag the primary path sets; it is not the route to a frame. The
 main thread is.
 
+## No crossing — and the main thread was never stuck
+
+2026-07-28, run 20260728-125032. The fence-crossing hypothesis is wrong.
+`GPU-CPU` sits at a constant -4 and never inverts:
+
+    GPU=0x0000027F  CPU=0x00000281  GPU-CPU=-2
+    GPU=0x000004F9  CPU=0x000004FD  GPU-CPU=-4
+    GPU=0x00000775  CPU=0x00000779  GPU-CPU=-4
+    GPU=0x00000C6F  CPU=0x00000C73  GPU-CPU=-4
+
+The wraparound comparison in sub_82ABA260 is sound. One run to establish it,
+which is the right price.
+
+**The larger correction: the main thread is not deadlocked, and never was.**
+`[device+0x2A9C]` is the *CPU* fence — the guest increments it when it submits
+work — and it climbs at about 128 per second alongside the GPU fence. Guest
+code is therefore running continuously and the fence wait is completing over
+and over. The main thread appears in every watchdog dump inside sub_82ABA260
+because that is where it spends most of its time, not because it is stuck
+there. The render loop turns over.
+
+**The `rptr` trailing `wptr` by six was also nothing.** CommandProcessorThread
+publishes `rptr = wptr` unconditionally from the same value it consumed, so the
+two cannot disagree. The printed gap is the guest advancing the register
+between the log line's two reads. Recorded because it was treated as a signal
+across three entries and it never was one.
+
+So a stall was being chased that does not exist. What is genuinely stuck is
+asset loading, and the evidence has been in every run since the file layer
+started working:
+
+    [file] read 524288 of 0x80000 bytes from "D:\packs\game.XEPACK"
+    [file] open FAILED "B<garbage>" (not found on the host)
+
+One read of the archive, then nothing. A filename assembled from uninitialised
+memory. Two threads — sub_829677D0 (the "Game Master") and sub_82A7CD00,
+spawned immediately after the sound pack opens — blocked in
+NtWaitForMultipleObjectsEx for the whole run.
+
+## RtlMultiByteToUnicodeN / RtlUnicodeToMultiByteN were never implemented
+
+2026-07-28. Both were generated stubs. The garbage filename appears in the log
+directly after they are first reached:
+
+    [import 63] RtlMultiByteToUnicodeN
+    [import 64] RtlUnicodeToMultiByteN
+    [file] open FAILED "B<garbage>" (not found on the host)
+
+Same failure as NtQueryInformationFile and VdGetSystemCommandBuffer before it:
+an out-parameter stub returns success-shaped nothing, and the caller reads
+whatever was already in the destination buffer. A loader thread that cannot
+open its file never signals the event the other threads wait on, which is a
+complete account of both permanent blocks.
+
+Two details that are silent when wrong, so both are stated in the code:
+
+- Every length in these APIs is in **bytes**, never characters. A UTF-16
+  destination of N bytes holds N/2 code units, and the returned count for the
+  multibyte->unicode direction is `chars * 2`.
+- The guest is **big-endian**, so each UTF-16 unit is byte-swapped through
+  StoreU16/LoadU16. Writing them host-native would produce strings that look
+  plausible in a hex dump and match nothing on disk.
+
+The mapping is Latin-1 <-> UTF-16, which is exact for ASCII — what asset paths
+are — and substitutes '?' for anything above 0xFF rather than pretending to
+implement a codepage we have no table for.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

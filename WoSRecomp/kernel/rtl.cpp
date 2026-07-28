@@ -90,3 +90,113 @@ PPC_FUNC(__imp__RtlRaiseException)
         code, numParams);
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// String conversion.
+//
+// Both of these were unimplemented, and their failure mode is the one this
+// project keeps meeting: an out-parameter stub that returns and writes nothing,
+// leaving the caller to read whatever was already in the destination buffer.
+// The run shows it directly —
+//
+//     [import 63] RtlMultiByteToUnicodeN
+//     [import 64] RtlUnicodeToMultiByteN
+//     [file] open FAILED "B<garbage>" (not found on the host)
+//
+// — a filename assembled out of uninitialised stack, immediately after the two
+// conversions are first reached. The thread that wanted that file then blocks
+// forever, and so does everything waiting on it.
+//
+// Two details worth stating because getting either wrong is silent:
+//
+//   * Every length in these APIs is in BYTES, never characters. A UTF-16
+//     destination of N bytes holds N/2 code units.
+//   * The guest is big-endian, so each UTF-16 unit has to be byte-swapped on
+//     the way in and out. Writing them natively would produce text that looks
+//     plausible in a hex dump and matches nothing.
+//
+// The conversion itself is Latin-1 <-> UTF-16: correct for ASCII, which is what
+// asset paths are, and honest about what it does rather than pretending to
+// implement a codepage we have no table for.
+// ---------------------------------------------------------------------------
+
+#ifdef WOS_IMPL_RtlMultiByteToUnicodeN
+// NTSTATUS RtlMultiByteToUnicodeN(PWCH   UnicodeString,             // r3
+//                                 ULONG  MaxBytesInUnicodeString,   // r4
+//                                 PULONG BytesInUnicodeString,      // r5, optional
+//                                 PCSTR  MultiByteString,           // r6
+//                                 ULONG  BytesInMultiByteString);   // r7
+PPC_FUNC(__imp__RtlMultiByteToUnicodeN)
+{
+    WOS_IMPORT_STUB("RtlMultiByteToUnicodeN");
+
+    const uint32_t dest = ctx.r3.u32;
+    const uint32_t destBytes = ctx.r4.u32;
+    const uint32_t writtenOut = ctx.r5.u32;
+    const uint32_t src = ctx.r6.u32;
+    const uint32_t srcBytes = ctx.r7.u32;
+
+    if (dest == 0 || src == 0)
+    {
+        ctx.r3.u64 = wos::kStatusInvalidParameter;
+        return;
+    }
+
+    // One source byte becomes one UTF-16 unit, so the destination bounds the
+    // conversion at half its byte count.
+    const uint32_t maxChars = destBytes / 2;
+    const uint32_t count = (srcBytes < maxChars) ? srcBytes : maxChars;
+
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const uint8_t ch = *reinterpret_cast<const uint8_t*>(base + src + i);
+        wos::StoreU16(base, dest + i * 2, ch);
+    }
+
+    if (writtenOut != 0)
+        wos::StoreU32(base, writtenOut, count * 2);
+
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif
+
+#ifdef WOS_IMPL_RtlUnicodeToMultiByteN
+// NTSTATUS RtlUnicodeToMultiByteN(PCHAR  MultiByteString,           // r3
+//                                 ULONG  MaxBytesInMultiByteString, // r4
+//                                 PULONG BytesInMultiByteString,    // r5, optional
+//                                 PCWCH  UnicodeString,             // r6
+//                                 ULONG  BytesInUnicodeString);     // r7
+PPC_FUNC(__imp__RtlUnicodeToMultiByteN)
+{
+    WOS_IMPORT_STUB("RtlUnicodeToMultiByteN");
+
+    const uint32_t dest = ctx.r3.u32;
+    const uint32_t destBytes = ctx.r4.u32;
+    const uint32_t writtenOut = ctx.r5.u32;
+    const uint32_t src = ctx.r6.u32;
+    const uint32_t srcBytes = ctx.r7.u32;
+
+    if (dest == 0 || src == 0)
+    {
+        ctx.r3.u64 = wos::kStatusInvalidParameter;
+        return;
+    }
+
+    const uint32_t srcChars = srcBytes / 2;
+    const uint32_t count = (srcChars < destBytes) ? srcChars : destBytes;
+
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const uint16_t unit = wos::LoadU16(base, src + i * 2);
+        // Anything outside Latin-1 has no single-byte form. '?' is what the
+        // real API substitutes, and it keeps the length exact.
+        *reinterpret_cast<uint8_t*>(base + dest + i) =
+            (unit <= 0xFF) ? uint8_t(unit) : uint8_t('?');
+    }
+
+    if (writtenOut != 0)
+        wos::StoreU32(base, writtenOut, count);
+
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif
