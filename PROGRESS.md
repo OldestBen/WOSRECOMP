@@ -28,39 +28,27 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **THE GAME BOOTS, RUNS, AND DRIVES THE GPU.** 76 imports
-  reached. The graphics layer no longer reports a hang, the ring buffer flows
-  continuously with the read pointer tracking the write pointer, and the GPU
-  fence advances in step with the CPU fence. Nothing is drawn — there is no
-  renderer, and `VdSwap` has still never been called.
-- **Idle, not stuck.** Every thread now blocks on a real wait instead of
-  spinning. The import heartbeat fell from **58,317,635 calls per five
-  seconds to ~11,000** — a factor of about 5,000 — once the last
-  success-returning wait stub was implemented.
-- **Three waits nobody signals**, which is the current blocker: handles
-  `0x00010050` and `0x00010024` via `NtWaitForMultipleObjectsEx` (both
-  through `sub_82B16CC8`, from thread entries `0x82A7CD00` and `0x829677D0`),
-  and the guest-embedded event at `0x4083FDCC` via `KeWaitForSingleObject`
-  from the two graphics threads at `0x82ACECF0`.
-- **Archive loading stops after one read** of 0x80000 bytes from
-  `game.XEPACK`.
-- **The frame-present path is never reached.** `sub_82AC4E48` calls
-  `VdGetSystemCommandBuffer` and then `VdSwap`; implementing the former did
-  not cause either to fire. `--xrefs` gives it three callers — `0x82939390`,
-  `0x82AB948C` and `0x82ACEDD8`, the last inside `sub_82ACECF0` itself — so
-  presentation is gated behind the graphics threads' wait.
-- **`sub_82ACECF0` has now been read.** Its loop waits on the KEVENT at
-  context+0x20 (0x4083FD7C and 0x4083FDCC, confirming the wait diagnostics),
-  with a ~30 ms timeout on one thread and INFINITE on the other, and it takes
-  the present branch on `STATUS_TIMEOUT` — *not* on a signal. Timeouts are
-  happening in bulk and the present path still never fires, so the reading is
-  incomplete in a way the disassembly cannot settle.
-- **Instrumented rather than guessed.** Two measurements are in place for the
-  next run: a wait call-site census (every wait now records its guest `bl`
-  address from `ctx.lr`, printed by the heartbeat), and guest-function
-  tripwires on `sub_82AC4E48` and `sub_82ACECF0` in `kernel/trace_guest.cpp`.
-  Between them the next run says which wait site the timeouts come from and
-  whether the present function is entered at all.
+- **Stage:** **BOOTS, RUNS A STEADY RENDER LOOP, AND LOADS ASSETS.** 79
+  imports reached, 76 implemented. Twelve threads. The command processor
+  consumes the ring continuously with the GPU fence tracking the CPU fence
+  four behind, and the game's own D3D layer is satisfied — no hang report.
+  **Nothing is drawn: there is no renderer and no window.**
+- **Asset loading works, partially.** `game_shared.ini`, `amalga.toc` and
+  774 KB out of `SOUNDSRC_RVB.PCK` all load. `game.XEPACK` still stops after
+  a single 0x80000 read.
+- **Two loader threads block forever** in `NtWaitForMultipleObjectsEx` via
+  `sub_82B16CC8` — `sub_829677D0` (the "Game Master") and `sub_82A7CD00`.
+  This is the current blocker for the rest of asset loading.
+- **The ring size encoding is unconfirmed.** `VdInitializeRingBuffer` is
+  given a raw argument of 0xE; a modelled 0x4000 dwords is too small, since
+  the write pointer passes it without wrapping. The capacity now grows and
+  reports rather than refusing to consume, because refusing is what made the
+  game declare the GPU hung. The next wrap settles the encoding.
+- **Corrected along the way:** the main thread was never deadlocked (it runs
+  a wraparound-safe fence wait that completes continuously), the GPU fence
+  never froze (a log line was capped at twelve), and there is no `Sleep()`
+  spin (the call-site counter is frozen after startup). Each of those was
+  believed and recorded before being measured.
 
 Full evidence for each of these is in
 [`docs/05-findings-log.md`](docs/05-findings-log.md).
@@ -89,6 +77,39 @@ Full evidence for each of these is in
 ---
 
 ## Log
+
+### 2026-07-28 (24) — Asset loading unblocked; the GPU hang was ours
+
+Two real fixes and three corrections.
+
+**RtlMultiByteToUnicodeN / RtlUnicodeToMultiByteN were never implemented.**
+Out-parameter stubs, so the game built a filename out of uninitialised stack
+and opened `"B<garbage>"`. Implementing them produced the first bulk asset
+load of the project — 774 KB out of `SOUNDSRC_RVB.PCK`, under a name the
+game round-trips through both conversions. Lengths are in bytes not
+characters and the guest's UTF-16 is big-endian; both are silent when wrong
+and both are stated in the code.
+
+**The ring capacity guard was hanging the GPU.** A run reached write pointer
+0x4003 against a modelled 0x4000 and refused to consume, which froze the
+fence, and the game's D3D layer declared the GPU hung within seconds. A
+write pointer cannot exceed the ring it indexes, so that is proof the number
+is wrong, not a reason to stop. It now grows and reports; the wrap will
+settle the encoding by measurement.
+
+**Three things believed and recorded that measurement then overturned:** the
+main thread was never deadlocked, the GPU fence never froze, and there is no
+`Sleep()` spin. Each looked convincing from a log and dissolved on contact
+with a counter. The pattern is consistent enough to be worth naming — a
+diagnostic that stops printing is not evidence that the thing it reports
+stopped happening.
+
+**Tooling:** `xex_info --field <disp> [--stores] [--context N]` finds who
+touches a struct field, which `--xrefs` structurally cannot do, and shows the
+value each store writes. `wos::LogCallSite` attributes any hot import to its
+guest call site via `ctx.lr`. Guest-function tripwires in
+`kernel/trace_guest.cpp` observe that control reached an address whose code
+calls no imports.
 
 ### 2026-07-28 (23) — sub_82ACECF0 read; present gated on a timeout that already happens
 

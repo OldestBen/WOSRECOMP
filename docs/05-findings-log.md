@@ -1700,6 +1700,33 @@ spin to fix. The call-site census earned its keep by ruling something out
 rather than finding something, which is the more common and less satisfying
 half of what a measurement does.
 
+## Adapting the ring capacity removes the hang
+
+2026-07-28, run 20260728-132643. The guard fires and the run continues:
+
+    [gpu] write pointer 0x4003 exceeds modelled ring capacity 0x4000 — the size
+          argument encoding is wrong. Growing to 0x8000 and continuing.
+    [video] ring: CP_RB_WPTR=0x00005C77 rptr_writeback=0x00005C71  moved
+
+No `ERR[D3D]: The GPU is hung!`, and the run passes the point that killed the
+previous one. The fence keeps tracking at a steady -4 well past 0x4000, which
+also says we are consuming real packets rather than reading rubbish — a
+misparse would desynchronise the fence immediately.
+
+The raw argument is 0xE. If the write pointer wraps at 0x8000 dwords then
+`size_bytes = 8 << log2` (0x20000 = 128 KB for log2 14), and the ring fits
+inside the 0xA0090000 physical block with room to spare: 0x914E0 to 0xC0000 is
+0xBAC8 dwords of headroom. That is a prediction the next wrap will confirm or
+refute; it is not yet established.
+
+**A bound that still needs adding.** If the write pointer never wraps and keeps
+climbing, ExecutePackets eventually reads past the ring's own allocation and
+into the next one at 0xA00C0000, roughly 0xBAC8 dwords out. Growing the
+capacity indefinitely trades a hang for silent corruption, which is the worse
+of the two. The wrap is what keeps this correct, so if a run ever passes 0x8000
+without wrapping, the capacity needs a hard ceiling at the allocation edge
+rather than another doubling.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
