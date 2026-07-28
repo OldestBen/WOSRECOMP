@@ -74,6 +74,59 @@ void WriteVideoMode(uint8_t* base, uint32_t out)
     wos::StoreU32(base, out + 0x2C, 0);
 }
 
+// Report whether the ring buffer is actually moving.
+//
+// Reading the game's own code settled what it is waiting for. The watchdog at
+// guest 0x82AC0C10 does this, once per spin:
+//
+//     r29 = the graphics context
+//     if ([r29+0x2ABD] & 2) return 0          // aborted
+//     progress = *(uint32_t*)[r29+0x2A90]     // GPU-written progress word
+//     now      = [[r13+0x100]+0x58]           // tick count
+//     if (progress != last) { deadline = now; last = progress; }
+//     if (now - deadline < 5000) return 1     // caller loops -> keep waiting
+//     ... timeout handler; if it returns 0, deadline = now, return 1
+//
+// So it waits on *change* in one word, and the only paths out are an abort
+// flag or a timeout handler that declines to continue. A word that never
+// changes means it never leaves — which is the spin we have been watching.
+//
+// [r29+0x2A90] is the address handed to VdEnableRingBufferRPtrWriteBack, and
+// we mirror CP_RB_WPTR into it. That is only progress if CP_RB_WPTR itself
+// moves. Nothing so far proves it does: the game wrote that register once
+// during init and we have never seen it written since.
+//
+// Rather than guess a third time, print both words and let a run say which is
+// stuck. Every ~2 s, and only when something changed or every 30 s otherwise,
+// so a long run does not drown in identical lines.
+void ReportRingProgress(uint8_t* base, uint32_t rptrPtr)
+{
+    static uint32_t s_lastWptr = 0;
+    static uint32_t s_lastRptr = 0;
+    static uint64_t s_lastReport = 0;
+    static bool s_first = true;
+
+    const uint64_t frame = g_vblankCount.load(std::memory_order_relaxed);
+    if (frame % 120 != 0)
+        return;
+
+    const uint32_t wptr = wos::LoadU32(base, kGpuWritePointerReg);
+    const uint32_t rptr = (rptrPtr != 0) ? wos::LoadU32(base, rptrPtr) : 0;
+
+    const bool changed = (wptr != s_lastWptr) || (rptr != s_lastRptr);
+    if (!s_first && !changed && frame - s_lastReport < 1800)
+        return;
+
+    printf("[video] ring: CP_RB_WPTR=0x%08X rptr_writeback[0x%08X]=0x%08X  %s\n",
+        wptr, rptrPtr, rptr,
+        changed ? "moved" : "UNCHANGED - the game's GPU watchdog sees no progress");
+
+    s_lastWptr = wptr;
+    s_lastRptr = rptr;
+    s_lastReport = frame;
+    s_first = false;
+}
+
 // Stands in for the display's vertical blank.
 //
 // Source 0 is vblank, 1 is a buffer swap. Firing only vblank is the
@@ -103,6 +156,8 @@ void VblankThread(uint8_t* base)
         const uint32_t rptrPtr = g_rptrWriteBackPtr.load(std::memory_order_relaxed);
         if (rptrPtr != 0)
             wos::StoreU32(base, rptrPtr, wos::LoadU32(base, kGpuWritePointerReg));
+
+        ReportRingProgress(base, rptrPtr);
 
         const uint32_t callback = g_interruptCallback.load(std::memory_order_relaxed);
         if (callback == 0)

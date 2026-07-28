@@ -765,6 +765,21 @@ static uint32_t branchTarget(uint32_t addr, uint32_t insn)
     return 0;
 }
 
+// A linking branch is a call: control comes back to the next instruction, so
+// its target is somewhere else entirely and says nothing about where this
+// function ends.
+//
+// Treating a call as an intra-function branch is not a cosmetic error. Nearly
+// every function opens with `bl __savegprlr_*`, whose target is far ahead of
+// the function, so "does anything branch past this terminator" was always true
+// and the walk never stopped — the first run of --disasm dumped 16384
+// instructions instead of the 52 the function actually has.
+static bool isCallInsn(uint32_t insn)
+{
+    const uint32_t op = PPC_OP(insn);
+    return (op == 18 || op == 16) && PPC_BL(insn);
+}
+
 // address -> symbol name, for annotating call targets. The import table is the
 // interesting part: a `bl` to an __imp__ thunk names the kernel call directly.
 static std::map<uint32_t, std::string> symbolMap(const Image& image)
@@ -827,7 +842,7 @@ static int disasm(const Image& image, uint32_t addr, uint32_t count)
                 break;
             end = a + 4;
 
-            if (const uint32_t t = branchTarget(a, insn); t != 0)
+            if (const uint32_t t = branchTarget(a, insn); t != 0 && !isCallInsn(insn))
             {
                 furthest = std::max(furthest, t);
                 labels.push_back(t);
