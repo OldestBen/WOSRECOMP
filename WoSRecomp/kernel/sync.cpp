@@ -469,6 +469,10 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
 {
     WOS_IMPORT_STUB("NtWaitForSingleObjectEx");
 
+    // A pending completion APC runs before the thread blocks — this is the
+    // alertable-wait boundary the real kernel delivers them at.
+    wos::DeliverPendingApcs(ctx, base);
+
     const uint32_t callSite = uint32_t(ctx.lr);
     auto obj = wos::ObjectFromAny(ctx.r3.u32);
     const int64_t timeoutMs = TimeoutToMillis(base, ctx.r6.u32);
@@ -772,6 +776,10 @@ PPC_FUNC(__imp__KeWaitForSingleObject)
 {
     WOS_IMPORT_STUB("KeWaitForSingleObject");
 
+    // A pending completion APC runs before the thread blocks — this is the
+    // alertable-wait boundary the real kernel delivers them at.
+    wos::DeliverPendingApcs(ctx, base);
+
     // Captured before the wait: ctx is the guest's live register file, and the
     // recompiled code the waking thread runs next will overwrite lr.
     const uint32_t callSite = uint32_t(ctx.lr);
@@ -865,6 +873,10 @@ PPC_FUNC(__imp__KeWaitForMultipleObjects)
 {
     WOS_IMPORT_STUB("KeWaitForMultipleObjects");
 
+    // A pending completion APC runs before the thread blocks — this is the
+    // alertable-wait boundary the real kernel delivers them at.
+    wos::DeliverPendingApcs(ctx, base);
+
     const uint32_t count = ctx.r3.u32;
     const uint32_t objectArray = ctx.r4.u32;
 
@@ -905,6 +917,10 @@ PPC_FUNC(__imp__KeWaitForMultipleObjects)
 PPC_FUNC(__imp__NtWaitForMultipleObjectsEx)
 {
     WOS_IMPORT_STUB("NtWaitForMultipleObjectsEx");
+
+    // A pending completion APC runs before the thread blocks — this is the
+    // alertable-wait boundary the real kernel delivers them at.
+    wos::DeliverPendingApcs(ctx, base);
 
     const uint32_t callSite = uint32_t(ctx.lr);
     const uint32_t count = ctx.r3.u32;

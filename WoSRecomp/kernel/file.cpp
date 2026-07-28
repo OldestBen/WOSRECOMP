@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <vector>
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
@@ -457,61 +458,31 @@ PPC_FUNC(__imp__NtReadFile)
     if (eventHandle != 0)
         wos::SignalEventIfAny(eventHandle);
 
-    // Deliver the completion APC.
+    // Queue the completion APC for delivery at the next wait on this thread.
     //
-    // Measured, not assumed: exactly one read in the run carries one — the
-    // async read of game.XEPACK, the read after which all asset loading stops.
+    // Delivering it inline here does not work, and the reason is instructive.
+    // The trampoline at guest 0x82B16658 does:
     //
-    //     [file] read carried a completion APC: routine 0x82B16659
-    //            context 0x829688C0 — WE DROP THIS
+    //     mr   r31,r4        ; IoStatusBlock
+    //     mr   r30,r3        ; ApcContext
+    //     lwz  r3,0(r31)     ; IOSB.Status
+    //     lwz  r4,4(r31)     ; IOSB.Information
+    //     mtctr r30 / bctrl  ; call ApcContext(error, bytes, iosb)
     //
-    // Dropping it leaves the game's request object in state 1 forever, so the
-    // completion routine at guest 0x82965488 never marks it 3, never signals
-    // the event, and the two loader threads wait on it for the whole run.
+    // and the context it calls, 0x829688C0, immediately reads [0x82F71AE4] —
+    // a field of the same request block the Game Master takes its wait handle
+    // from. On the real console NtReadFile returns first and the caller
+    // finishes populating that block; the APC fires afterwards. Called inline,
+    // the APC reads the block before the caller has written it.
     //
-    // Ours is a synchronous read: by the time we are here the transfer is
-    // done and the status block is filled, which is exactly the state a real
-    // completion APC expects. Running it inline on the calling thread is
-    // therefore closer to correct than deferring it — the true kernel would
-    // run it at APC level on this same thread shortly after return.
-    //
-    // The routine address arrives ODD (0x82B16659). PowerPC instructions are
-    // 4-byte aligned, so the low bits are a flag, not part of the address.
-    // Masking them is a reading of the encoding, not a fact, so the call is
-    // refused unless the masked address resolves to a real recompiled
-    // function — a wrong guess then reports itself instead of jumping into
-    // nothing.
+    // The real kernel delivers an APC to the ISSUING THREAD when it next
+    // enters an alertable wait, which is both the correct semantics and the
+    // simplest thing that fixes the ordering: queue it here, drain it at the
+    // top of the wait implementations. Thread-local, so it lands on the thread
+    // that issued the read, which is what the guest's own thread-affine state
+    // expects.
     if (apcRoutine != 0)
-    {
-        const uint32_t target = apcRoutine & ~3u;
-        PPCFunc* routine = PPC_LOOKUP_FUNC(base, target);
-
-        static unsigned s_logged = 0;
-        const bool report = (s_logged < 4);
-        if (report)
-            ++s_logged;
-
-        if (routine == nullptr)
-        {
-            printf("[file] completion APC 0x%08X (masked 0x%08X) is not a known "
-                   "function — not calling it\n", apcRoutine, target);
-        }
-        else
-        {
-            if (report)
-                printf("[file] delivering completion APC 0x%08X -> 0x%08X, "
-                       "context 0x%08X\n", apcRoutine, target, apcContext);
-
-            // VOID ApcRoutine(PVOID ApcContext, PIO_STATUS_BLOCK, ULONG Reserved)
-            const PPCContext saved = ctx;
-            ctx.r3.u64 = apcContext;
-            ctx.r4.u64 = ioStatusBlock;
-            ctx.r5.u64 = 0;
-            routine(ctx, base);
-            ctx = saved;
-        }
-    }
-
+        wos::QueueThreadApc(apcRoutine, apcContext, ioStatusBlock);
 
     printf("[file] read %zu of 0x%X bytes from \"%s\" into guest 0x%08X\n",
         read, length, file->guestPath.c_str(), buffer);
@@ -519,3 +490,78 @@ PPC_FUNC(__imp__NtReadFile)
     ctx.r3.u64 = (read == 0 && length != 0) ? kStatusEndOfFile : wos::kStatusSuccess;
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// Per-thread APC queue.
+//
+// See the comment at the queue site in NtReadFile for why these cannot be
+// delivered inline. Kept here rather than in sync.cpp because the only
+// producer is the file layer; sync.cpp merely drains it.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+struct PendingApc
+{
+    uint32_t routine = 0;   // raw, low bits still set
+    uint32_t context = 0;
+    uint32_t iosb = 0;
+};
+
+// Thread-local by design: an APC belongs to the thread that issued the I/O,
+// and guest completion routines touch thread-affine state.
+thread_local std::vector<PendingApc> t_apcQueue;
+
+} // namespace
+
+namespace wos
+{
+
+void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
+{
+    t_apcQueue.push_back({ routine, context, iosb });
+}
+
+void DeliverPendingApcs(PPCContext& ctx, uint8_t* base)
+{
+    if (t_apcQueue.empty())
+        return;
+
+    // Move first: a completion routine may issue another read and queue a
+    // further APC, and appending to the vector being iterated would be a
+    // use-after-realloc. The new one is delivered at the next wait.
+    std::vector<PendingApc> queue;
+    queue.swap(t_apcQueue);
+
+    for (const auto& apc : queue)
+    {
+        // The routine address arrives with its low bits set (0x82B16659).
+        // PowerPC instructions are 4-byte aligned, so those are flags.
+        const uint32_t target = apc.routine & ~3u;
+        PPCFunc* routine = PPC_LOOKUP_FUNC(base, target);
+        if (routine == nullptr)
+        {
+            printf("[file] queued APC 0x%08X (masked 0x%08X) is not a known "
+                   "function — dropped\n", apc.routine, target);
+            continue;
+        }
+
+        static unsigned s_logged = 0;
+        if (s_logged < 4)
+        {
+            ++s_logged;
+            printf("[file] delivering queued APC 0x%08X -> 0x%08X, context 0x%08X\n",
+                apc.routine, target, apc.context);
+        }
+
+        const PPCContext saved = ctx;
+        ctx.r3.u64 = apc.context;
+        ctx.r4.u64 = apc.iosb;
+        ctx.r5.u64 = 0;
+        routine(ctx, base);
+        ctx = saved;
+    }
+}
+
+} // namespace wos

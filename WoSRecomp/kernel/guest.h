@@ -10,6 +10,11 @@
 #include <cstring>
 #include <mutex>
 
+// Declared, not included: guest.h is included by translation units that do not
+// pull in the recompiler headers, and a reference to an incomplete type is all
+// the APC declaration below needs.
+struct PPCContext;
+
 namespace wos
 {
 
@@ -81,6 +86,15 @@ bool GuestCommit(uint8_t* base, uint32_t addr, uint32_t size);
 // one. Implemented in kernel/system.cpp. Lets host code bound a read against
 // the block it was actually given rather than against the whole alias window.
 uint32_t PhysicalBlockEnd(uint32_t addr);
+
+// Completion APCs from asynchronous I/O.
+//
+// An APC belongs to the thread that issued the read and must not run before
+// that read's caller has returned — see the comment at the queue site in
+// kernel/file.cpp. QueueThreadApc records one; DeliverPendingApcs runs whatever
+// the calling thread has pending and is called at the top of every wait.
+void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb);
+void DeliverPendingApcs(PPCContext& ctx, uint8_t* base);
 
 // Watch the D3D device fields that gate the frame loop. Implemented in
 // kernel/d3d_probe.cpp — see the comment there for which fields and why.

@@ -2096,6 +2096,52 @@ Recorded as a negative result with the mechanism intact rather than as a
 failure: the delivery path now exists and is proven to reach guest code, which
 is a prerequisite for whatever the right completion turns out to be.
 
+## The APC was called correctly — at the wrong time
+
+2026-07-28. Reading the trampoline at 0x82B16658 shows the call was right and
+the timing was not:
+
+    82B1666C  mr   r31,r4        ; IoStatusBlock
+    82B16670  mr   r30,r3        ; ApcContext
+    82B16678  lwz  r3,0(r31)     ; IOSB.Status
+    82B1667C  rlwinm r10,r3,0,0,1 ; & 0xC0000000
+    82B16684  bne  -> success
+    82B16694  lwz  r4,4(r31)     ; IOSB.Information = bytes
+    82B16698  li   r3,0          ; error = 0
+    82B1669C  mr   r5,r31
+    82B166A0  mtctr r30 / bctrl  ; ApcContext(error, bytes, iosb)
+
+So arg1 is the function and arg2 the status block, which is exactly what was
+passed — the ApcContext being a .text address was the clue, and 0x82B16658 is a
+trampoline rather than the completion. It read our Status of 0, took the
+success branch, picked up Information = 524288, and called 0x829688C0:
+
+    829688D8  addi r31,r11,6860  ; r31 = 0x82F71ACC
+    829688DC  lwz  r3,24(r31)    ; [0x82F71AE4]
+    829688E0  bl   0x82968498    ; the real completion
+    829688E8  stw  r11,16(r31)   ; [0x82F71ADC] = 0
+
+0x82F71ACC is the same request block the Game Master takes its wait handle
+from — its handles[0] is `lwz r11,20(r26)` with r26 = 0x82F71ACC, i.e.
+[0x82F71AE0]. Fields at +0x10, +0x14 and +0x18 of one structure.
+
+**Which makes it an ordering bug, not an argument bug.** The APC was being run
+*inside* NtReadFile, before it returned. On the real console the read is
+asynchronous: NtReadFile returns, the caller finishes populating that block,
+and the APC fires afterwards. Called inline, 0x829688C0 reads [0x82F71AE4]
+before the caller has written it.
+
+The real kernel delivers an APC to the issuing thread when it next enters an
+alertable wait. That is both the correct semantics and the smallest change
+that fixes the ordering, so: a thread-local queue filled by NtReadFile and
+drained at the top of every wait implementation. Thread-local because an APC
+belongs to the thread that issued the I/O and guest completion routines touch
+thread-affine state.
+
+The queue is swapped out before iterating, because a completion routine may
+issue another read and queue a further APC — appending to the vector being
+walked would be a use-after-realloc. The new one goes out at the next wait.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
