@@ -686,6 +686,7 @@ int WaitAnyOf(uint8_t* base, uint32_t handleArray, uint32_t count, int64_t timeo
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
+    bool reported = false;
 
     for (;;)
     {
@@ -710,13 +711,25 @@ int WaitAnyOf(uint8_t* base, uint32_t handleArray, uint32_t count, int64_t timeo
             if (!wos::g_anySignalCv.wait_for(lock, std::chrono::seconds(5), changed))
             {
                 lock.unlock();
-                static bool s_reported = false;
-                if (!s_reported)
+
+                // Per-CALL, not per-function. A `static bool` here reports once
+                // across every thread and every call site, which silently hid
+                // two permanently blocked threads in the first run after this
+                // was written — the reports stopped and it looked like a fix.
+                // `reported` is a local, so each blocked wait speaks once.
+                if (!reported)
                 {
-                    s_reported = true;
+                    reported = true;
                     std::lock_guard<std::recursive_mutex> diag(wos::DiagnosticLock());
-                    printf("[sync] %s: none of %u object(s) signalled in 5s. Blocked in:\n",
+                    printf("[sync] %s: none of %u object(s) signalled in 5s.\n",
                         who, count);
+                    for (uint32_t i = 0; i < count; ++i)
+                    {
+                        const uint32_t h = wos::LoadU32(base, handleArray + i * 4);
+                        printf("[sync]   [%u] handle 0x%08X -> %s\n", i, h,
+                            events[i] != nullptr ? events[i]->type : "NOT AN EVENT");
+                    }
+                    printf("[sync]   blocked in:\n");
                     wos::PrintGuestStack(12);
                 }
             }

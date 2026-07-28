@@ -1816,6 +1816,43 @@ allocation and the hash — the caveat being that dedup then depends on each
 import name appearing as exactly one literal in the binary, which is true today
 but is a property nothing enforces.
 
+## WaitAny unblocked one path, not the two it was aimed at
+
+2026-07-28, run 20260728-140158. Partial result, and one self-inflicted piece
+of confusion worth recording before the rest.
+
+**The two "still waiting after 5s" reports disappeared, and that was my bug,
+not a fix.** `WaitAnyOf` reported through a `static bool s_reported` — function
+scope, so once across every thread and every call site. The reports stopping
+looked exactly like the threads unblocking. They had not: the stack dump shows
+4101 and 4104 both parked in `WaitAnyOf`, and the census shows their objects at
+one completed call each and no timeouts, i.e. entered a second time and never
+returned. It is now a local, so each blocked wait speaks once, and it prints
+the whole handle array with each object's type — which is the thing actually
+worth knowing and was not being captured.
+
+That is the same shape of mistake as the capped `op=0x58` log line: a
+diagnostic that stops printing looked like the condition it reports going away.
+Twice in one session, from opposite directions.
+
+**What did change is real.** One wait site went from crawling to cycling:
+
+    bl@0x82B22AB4 -> obj 0x0001000C   5 calls  ->  702 calls, 0 timeouts
+    ev1 waits/timeouts/signals        6/0/2231 ->  703/0/4144
+
+and `NtWaitForSingleObjectEx` went from about 7,000 to about 12,000 calls per
+five seconds. So the WaitAny fix unblocked a path that had been managing a
+handful of iterations per run — just not either of the two threads it was
+aimed at.
+
+**Unchanged:** import count, `game.XEPACK` still one 0x80000 read, and the
+graphics thread still waiting on 0x4083FDCC.
+
+The next run's `[sync]` block will say what the two blocked waits are waiting
+on — count, every handle, and whether each resolves to an object we know. If a
+handle in that array is not an event at all, that is the answer, and it is a
+different bug from the one just fixed.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
