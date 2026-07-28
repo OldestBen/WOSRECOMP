@@ -684,10 +684,19 @@ int WaitAnyOf(uint8_t* base, uint32_t handleArray, uint32_t count, int64_t timeo
             ev->waits.fetch_add(1, std::memory_order_relaxed);
     }
 
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
+    const auto started = std::chrono::steady_clock::now();
+    const bool infinite = (timeoutMs < 0);
+    const auto deadline = started + std::chrono::milliseconds(infinite ? 0 : timeoutMs);
     bool reported = false;
 
+    // One loop for both cases rather than a branch per timeout kind.
+    //
+    // The previous shape put the "still blocked after 5s" report inside the
+    // INFINITE branch only, so a wait with a large *finite* timeout — hours,
+    // which is what these callers actually pass — sat there silently and could
+    // not be seen at all. Two threads did exactly that for entire runs. The
+    // report now depends on elapsed time, not on which kind of wait it is,
+    // which is the property that was wanted in the first place.
     for (;;)
     {
         uint64_t generation;
@@ -700,51 +709,38 @@ int WaitAnyOf(uint8_t* base, uint32_t handleArray, uint32_t count, int64_t timeo
             if (events[i] != nullptr && events[i]->TryConsume())
                 return int(i);
 
+        const auto now = std::chrono::steady_clock::now();
+        if (!infinite && now >= deadline)
+        {
+            for (uint32_t i = 0; i < count; ++i)
+                if (events[i] != nullptr)
+                    events[i]->timeouts.fetch_add(1, std::memory_order_relaxed);
+            return -1;
+        }
+
+        if (!reported && now - started >= std::chrono::seconds(5))
+        {
+            reported = true;
+            std::lock_guard<std::recursive_mutex> diag(wos::DiagnosticLock());
+            printf("[sync] %s: none of %u object(s) signalled in 5s (timeout %s).\n",
+                who, count, infinite ? "INFINITE" : "finite");
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const uint32_t h = wos::LoadU32(base, handleArray + i * 4);
+                printf("[sync]   [%u] handle 0x%08X -> %s\n", i, h,
+                    events[i] != nullptr ? events[i]->type : "NOT AN EVENT");
+            }
+            printf("[sync]   blocked in:\n");
+            wos::PrintGuestStack(12);
+        }
+
+        // Wake at least every second even with nothing to do, so the report
+        // above cannot be starved by a quiet period.
+        const auto wakeBy = now + std::chrono::seconds(1);
         std::unique_lock<std::mutex> lock(wos::g_anySignalMutex);
-        auto changed = [&] { return wos::g_anySignalGeneration != generation; };
-
-        if (timeoutMs < 0)
-        {
-            // Bounded even when the caller said INFINITE, so a permanently
-            // unsignalled set reports itself rather than going quiet — the
-            // failure this whole function exists to stop hiding.
-            if (!wos::g_anySignalCv.wait_for(lock, std::chrono::seconds(5), changed))
-            {
-                lock.unlock();
-
-                // Per-CALL, not per-function. A `static bool` here reports once
-                // across every thread and every call site, which silently hid
-                // two permanently blocked threads in the first run after this
-                // was written — the reports stopped and it looked like a fix.
-                // `reported` is a local, so each blocked wait speaks once.
-                if (!reported)
-                {
-                    reported = true;
-                    std::lock_guard<std::recursive_mutex> diag(wos::DiagnosticLock());
-                    printf("[sync] %s: none of %u object(s) signalled in 5s.\n",
-                        who, count);
-                    for (uint32_t i = 0; i < count; ++i)
-                    {
-                        const uint32_t h = wos::LoadU32(base, handleArray + i * 4);
-                        printf("[sync]   [%u] handle 0x%08X -> %s\n", i, h,
-                            events[i] != nullptr ? events[i]->type : "NOT AN EVENT");
-                    }
-                    printf("[sync]   blocked in:\n");
-                    wos::PrintGuestStack(12);
-                }
-            }
-        }
-        else
-        {
-            if (std::chrono::steady_clock::now() >= deadline)
-            {
-                for (uint32_t i = 0; i < count; ++i)
-                    if (events[i] != nullptr)
-                        events[i]->timeouts.fetch_add(1, std::memory_order_relaxed);
-                return -1;
-            }
-            wos::g_anySignalCv.wait_until(lock, deadline, changed);
-        }
+        wos::g_anySignalCv.wait_until(lock,
+            (infinite || deadline > wakeBy) ? wakeBy : deadline,
+            [&] { return wos::g_anySignalGeneration != generation; });
     }
 }
 

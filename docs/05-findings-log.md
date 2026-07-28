@@ -1853,6 +1853,47 @@ on — count, every handle, and whether each resolves to an object we know. If a
 handle in that array is not an event at all, that is the answer, and it is a
 different bug from the one just fixed.
 
+## The blocked waits are not INFINITE — and the report could not see them
+
+2026-07-28, run 20260728-143053. The handle dump added last round never
+appeared. The stack says why:
+
+    #4 std::condition_variable::wait_until<...`lambda at sync.cpp:704`>
+    #5 `anonymous namespace'::WaitAnyOf +0x40C
+
+Line 704 is the `wait_until` in the **timed** branch. The five-second report
+was written inside the `timeoutMs < 0` branch only, so a wait with a large
+*finite* timeout could not report at all. Both blocked threads are in that
+branch, which means their timeouts are finite and long — long enough that they
+neither return nor expire across an entire run.
+
+That also corrects the census reading. `bl@0x82B22AB4 -> obj 0x0001002C
+INFINITE` is not describing the blocked call: the row records the timeout of a
+call that *returned*, and the currently blocked call is a later one with
+different arguments. The census reports completed waits by construction, so it
+can never describe the wait that is stuck. Worth remembering before reading a
+blocked object's timeout out of that table again.
+
+The loop is now one shape for both cases, with the report driven by elapsed
+time rather than by which branch it took. It also wakes at least once a second
+so a quiet period cannot starve the report.
+
+This is the third time this session an instrumentation gap has read as a
+result: the capped `op=0x58` line, the function-scope `static bool`, and now a
+report on the wrong side of a branch. All three had the same shape — the
+absence of output taken as the absence of the condition.
+
+**Also unexplained, and worth chasing after this:** two handles reach
+`NtWaitForSingleObjectEx`'s unknown-object fallback and get success returned
+immediately.
+
+    [sync] wait on unknown object 0x00010068 — returning success
+    [sync] wait on unknown object 0x00010064 — returning success
+
+Both appear right after `KeInitializeSemaphore`, and there is no semaphore
+object type in object.cpp at all. A wait on a semaphore that returns success
+without waiting is the same class of bug as the original wait stubs.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
