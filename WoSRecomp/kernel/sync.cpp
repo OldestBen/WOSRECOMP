@@ -22,6 +22,32 @@
 namespace wos
 {
 
+// A wake channel shared by every event, so a wait spanning several objects can
+// be woken by whichever one signals.
+//
+// Each EventObject has its own condition variable, which is exactly right for
+// waiting on that object and useless for waiting on a set of them: there is no
+// way to block on several condition variables at once. Rather than give every
+// wait a bespoke shared state, every Set() bumps one global generation counter
+// and notifies one global variable. A WaitAny sleeps on that, wakes on any
+// signal anywhere, and re-checks its own objects.
+//
+// The cost is that an unrelated event's signal wakes a WaitAny spuriously.
+// That is a re-check of a handful of booleans, and signals run in the low
+// thousands per second, so it is not a rate worth engineering around.
+std::mutex g_anySignalMutex;
+std::condition_variable g_anySignalCv;
+uint64_t g_anySignalGeneration = 0;
+
+void NotifyAnyWaiters()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_anySignalMutex);
+        ++g_anySignalGeneration;
+    }
+    g_anySignalCv.notify_all();
+}
+
 struct EventObject : KernelObject
 {
     std::mutex m;
@@ -51,6 +77,20 @@ struct EventObject : KernelObject
         // to sleep. notify_one would be enough but is easier to get subtly
         // wrong when a waiter times out between the notify and the wake.
         cv.notify_all();
+        NotifyAnyWaiters();
+    }
+
+    // Take the signal if there is one, without blocking. Used by WaitAny,
+    // which cannot simply wait on one object's condition variable because it
+    // has to be woken by whichever of several objects signals first.
+    bool TryConsume()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if (!signalled)
+            return false;
+        if (!manualReset)
+            signalled = false;
+        return true;
     }
 
     void Clear()
@@ -612,6 +652,89 @@ bool WaitOnObject(uint32_t handleOrPtr, int64_t timeoutMs, const char* who)
     return true;
 }
 
+// Wait until ANY of the objects is signalled, or the timeout expires.
+// Returns the index that satisfied the wait, or -1 on timeout.
+//
+// This replaces a stated shortcut that waited on the first object only. The
+// comment on it said "if something starts behaving as though the wrong object
+// signalled it, look here first", and that is exactly what happened: two loader
+// threads sat in NtWaitForMultipleObjectsEx for entire runs while the events
+// around them were signalled sixteen hundred times. Waiting on the first handle
+// of a WaitAny is not a lateness bug, it is a permanent block whenever the
+// signalling object is not the one at index zero.
+//
+// Correct within the model we have: consume-if-signalled across the whole set,
+// then sleep on the shared wake channel until any event anywhere signals, then
+// re-check. The generation counter closes the race between the check and the
+// sleep — a Set() landing in that window bumps it, so the wait returns at once
+// rather than missing the wake.
+int WaitAnyOf(uint8_t* base, uint32_t handleArray, uint32_t count, int64_t timeoutMs,
+              const char* who)
+{
+    std::vector<wos::EventObject*> events(count, nullptr);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const uint32_t h = wos::LoadU32(base, handleArray + i * 4);
+        auto obj = wos::ObjectFromAny(h);
+        auto* ev = dynamic_cast<wos::EventObject*>(obj.get());
+        if (ev == nullptr)
+            ev = EmbeddedEvent(h, who);
+        events[i] = ev;
+        if (ev != nullptr)
+            ev->waits.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
+
+    for (;;)
+    {
+        uint64_t generation;
+        {
+            std::lock_guard<std::mutex> lock(wos::g_anySignalMutex);
+            generation = wos::g_anySignalGeneration;
+        }
+
+        for (uint32_t i = 0; i < count; ++i)
+            if (events[i] != nullptr && events[i]->TryConsume())
+                return int(i);
+
+        std::unique_lock<std::mutex> lock(wos::g_anySignalMutex);
+        auto changed = [&] { return wos::g_anySignalGeneration != generation; };
+
+        if (timeoutMs < 0)
+        {
+            // Bounded even when the caller said INFINITE, so a permanently
+            // unsignalled set reports itself rather than going quiet — the
+            // failure this whole function exists to stop hiding.
+            if (!wos::g_anySignalCv.wait_for(lock, std::chrono::seconds(5), changed))
+            {
+                lock.unlock();
+                static bool s_reported = false;
+                if (!s_reported)
+                {
+                    s_reported = true;
+                    std::lock_guard<std::recursive_mutex> diag(wos::DiagnosticLock());
+                    printf("[sync] %s: none of %u object(s) signalled in 5s. Blocked in:\n",
+                        who, count);
+                    wos::PrintGuestStack(12);
+                }
+            }
+        }
+        else
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+            {
+                for (uint32_t i = 0; i < count; ++i)
+                    if (events[i] != nullptr)
+                        events[i]->timeouts.fetch_add(1, std::memory_order_relaxed);
+                return -1;
+            }
+            wos::g_anySignalCv.wait_until(lock, deadline, changed);
+        }
+    }
+}
+
 } // namespace
 
 #ifdef WOS_IMPL_KeWaitForSingleObject
@@ -786,18 +909,22 @@ PPC_FUNC(__imp__NtWaitForMultipleObjectsEx)
                 WaitOnObject(handle, timeoutMs, "NtWaitForMultipleObjectsEx");
             wos::RecordWaitSite(callSite, handle, timeoutMs, signalled);
         }
-    }
-    else
-    {
-        const uint32_t handle = wos::LoadU32(base, handleArray);
-        const bool signalled =
-            WaitOnObject(handle, timeoutMs, "NtWaitForMultipleObjectsEx");
-        wos::RecordWaitSite(callSite, handle, timeoutMs, signalled);
+        ctx.r3.u64 = wos::kStatusSuccess;
+        return;
     }
 
-    // The return value for WaitAny is the index that signalled. We waited on
-    // the first, so report that rather than inventing an index we did not
-    // observe.
-    ctx.r3.u64 = wos::kStatusSuccess;
+    const int index = WaitAnyOf(base, handleArray, bounded, timeoutMs,
+        "NtWaitForMultipleObjectsEx");
+
+    // Attribute to the object that actually satisfied the wait, not to the
+    // first one — the census is what would show a recurrence of the old bug.
+    const uint32_t satisfied = wos::LoadU32(base,
+        handleArray + (index >= 0 ? uint32_t(index) : 0u) * 4);
+    wos::RecordWaitSite(callSite, satisfied, timeoutMs, index >= 0);
+
+    // WAIT_OBJECT_0 + index is the documented return for WaitAny, and the
+    // caller uses it to tell which handle woke it. Returning 0 unconditionally
+    // — as this did — tells every caller it was the first one.
+    ctx.r3.u64 = (index >= 0) ? uint32_t(index) : wos::kStatusTimeout;
 }
 #endif

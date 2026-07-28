@@ -1750,6 +1750,72 @@ quietly. The span check after the clamp is not redundant: with a ceiling in
 place the write pointer can still exceed the capacity, and at that point
 refusing the read is correct.
 
+## WaitAny waited on the first object only — a documented shortcut that was a deadlock
+
+2026-07-28. `NtWaitForMultipleObjectsEx` carried this comment since it was
+written:
+
+    // WaitAll waits on every object in turn; WaitAny waits on the first.
+    // Waiting on the first is a stated shortcut ... a game that expects to be
+    // woken by the *second* handle will wake late. If something starts behaving
+    // as though the wrong object signalled it, look here first.
+
+That is what has been happening. Threads 4101 (sub_829677D0, the "Game Master")
+and 4104 (sub_82A7CD00) have blocked there for every run since the file layer
+started working, while ev0 and ev1 were signalled about sixteen hundred times
+each. Waiting on handle[0] of a WaitAny is not a lateness bug — it is a
+permanent block whenever the object that signals is not at index zero.
+
+Two things were wrong, not one. The wait, and the **return value**: it returned
+`kStatusSuccess` (0) unconditionally, which is `WAIT_OBJECT_0 + 0`. Even if the
+right object had woken it, every caller was being told the first handle
+signalled. A caller that switches on that result would take the wrong branch
+every time.
+
+**How the fix works.** Each EventObject has its own condition variable, which is
+right for waiting on that object and useless for waiting on a set — there is no
+way to block on several condition variables at once. So every `Set()` now bumps
+one global generation counter and notifies one global condition variable. A
+WaitAny consumes across its whole set, then sleeps on that channel, then
+re-checks. The generation counter closes the check-then-sleep race: a `Set()`
+landing in that window bumps it, so the sleep returns immediately instead of
+missing the wake.
+
+The cost is that an unrelated event wakes a WaitAny spuriously. That is a
+re-check of a handful of booleans against signals running in the low thousands
+per second, so it is not worth engineering around.
+
+An INFINITE WaitAny is bounded internally at five seconds per iteration purely
+so it can report itself once and print a guest stack before continuing to wait.
+A wait that goes quiet forever is the failure this function exists to stop
+hiding, and it should not be able to hide its own.
+
+**Still shortcut, deliberately:** `KeWaitForMultipleObjects` has the same "first
+object only" behaviour. Nothing is blocked there, its argument layout is not
+confirmed, and changing two things at once is how the last several wrong turns
+happened. It is recorded here rather than fixed.
+
+## The import log serialises every guest thread
+
+2026-07-28. Visible in the same stack dump, two threads caught inside our own
+instrumentation:
+
+    #0 malloc_base / #1 operator new / #2 wos::LogImportCall +0xAB
+    #0 Mtx_lock / #1 wos::RecordWaitSite +0x2E
+
+`LogImportCall` does `g_counts.try_emplace(name, 0)` on an
+`unordered_map<std::string, uint64_t>` under a global mutex, for every import
+call. That constructs a std::string and hashes it each time. During startup,
+with 29 million KeDelayExecutionThread calls, every guest thread is funnelling
+through one lock and one allocator.
+
+Not fixed yet, and worth being explicit about why it matters beyond speed: this
+is measurement apparatus distorting the thing it measures. The names are string
+literals with stable addresses, so keying on the pointer would remove both the
+allocation and the hash — the caveat being that dedup then depends on each
+import name appearing as exactly one literal in the binary, which is true today
+but is a property nothing enforces.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
