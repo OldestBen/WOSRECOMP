@@ -95,6 +95,96 @@ struct MutantObject : KernelObject
 std::mutex g_eventListMutex;
 std::vector<std::weak_ptr<EventObject>> g_allEvents;
 
+// ---------------------------------------------------------------------------
+// Wait call-site census.
+//
+// The per-object counters above answer "what is being waited on"; they cannot
+// answer "by whom, from where, and with what timeout". That distinction is now
+// the thing standing between us and a frame.
+//
+// sub_82ACECF0 — the function both graphics threads sit in — contains more than
+// one wait, and which one a thread is in decides everything: one waits with a
+// ~30 ms relative timeout (0xFFFFFFFFFFFB6C20 in 100 ns units), the other waits
+// INFINITE, and the frame-present branch is taken on the *timeout* result, not
+// on a signal. Guessing which site a given thread reached has already cost this
+// project several wrong turns.
+//
+// XenonRecomp writes the guest return address into ctx.lr immediately before
+// every `bl`, so inside an import implementation ctx.lr is the guest call site
+// plus four — exact attribution, for free. Key on (call site, object) so the
+// same wait site used against two different objects shows up as two rows, which
+// is precisely the case here.
+// ---------------------------------------------------------------------------
+
+struct WaitSite
+{
+    uint32_t callSite = 0;      // guest address of the instruction after the bl
+    uint32_t object = 0;
+    int64_t timeoutMs = 0;      // last timeout seen; -1 = infinite
+    uint64_t calls = 0;
+    uint64_t timeouts = 0;
+};
+
+std::mutex g_waitSiteMutex;
+// Bounded on purpose: this runs on every wait, and an unbounded map keyed by a
+// value the guest controls is a slow memory leak waiting to happen.
+constexpr size_t kMaxWaitSites = 64;
+std::vector<WaitSite> g_waitSites;
+
+void RecordWaitSite(uint32_t callSite, uint32_t object, int64_t timeoutMs, bool signalled)
+{
+    std::lock_guard<std::mutex> lock(g_waitSiteMutex);
+
+    for (auto& site : g_waitSites)
+    {
+        if (site.callSite == callSite && site.object == object)
+        {
+            site.timeoutMs = timeoutMs;
+            ++site.calls;
+            if (!signalled)
+                ++site.timeouts;
+            return;
+        }
+    }
+
+    if (g_waitSites.size() >= kMaxWaitSites)
+        return;
+
+    g_waitSites.push_back({ callSite, object, timeoutMs, 1, signalled ? 0ull : 1ull });
+}
+
+void ReportWaitSites()
+{
+    std::vector<WaitSite> rows;
+    {
+        std::lock_guard<std::mutex> lock(g_waitSiteMutex);
+        rows = g_waitSites;
+    }
+
+    if (rows.empty())
+        return;
+
+    std::sort(rows.begin(), rows.end(),
+        [](const WaitSite& a, const WaitSite& b) { return a.calls > b.calls; });
+
+    printf("[waitsites] %zu site(s):\n", rows.size());
+    for (size_t i = 0; i < rows.size() && i < 8; ++i)
+    {
+        char timeout[32];
+        if (rows[i].timeoutMs < 0)
+            snprintf(timeout, sizeof(timeout), "INFINITE");
+        else
+            snprintf(timeout, sizeof(timeout), "%lldms", (long long)rows[i].timeoutMs);
+
+        // callSite is the return address; the `bl` itself is four bytes back,
+        // which is the address to feed to --disasm.
+        printf("    bl@0x%08X -> obj 0x%08X  %-8s  %llu call(s), %llu timeout(s)\n",
+            rows[i].callSite - 4, rows[i].object, timeout,
+            (unsigned long long)rows[i].calls,
+            (unsigned long long)rows[i].timeouts);
+    }
+}
+
 void ReportWaitActivity()
 {
     struct Row { int index; uint32_t ptr; uint64_t waits, timeouts, signals; bool manual; };
@@ -118,7 +208,13 @@ void ReportWaitActivity()
     }
 
     if (rows.empty())
+    {
+        // Call sites are recorded even for objects that are not EventObjects
+        // (mutants, adopted-then-freed blocks), so this half of the report can
+        // have something to say when the other half does not.
+        ReportWaitSites();
         return;
+    }
 
     std::sort(rows.begin(), rows.end(),
         [](const Row& a, const Row& b) { return a.waits > b.waits; });
@@ -135,6 +231,8 @@ void ReportWaitActivity()
             (unsigned long long)rows[i].signals);
     }
     printf("   [waits/timeouts/signals]\n");
+
+    ReportWaitSites();
 }
 
 void SignalEventIfAny(uint32_t handleOrPtr)
@@ -315,12 +413,15 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
 {
     WOS_IMPORT_STUB("NtWaitForSingleObjectEx");
 
+    const uint32_t callSite = uint32_t(ctx.lr);
     auto obj = wos::ObjectFromAny(ctx.r3.u32);
     const int64_t timeoutMs = TimeoutToMillis(base, ctx.r6.u32);
 
     if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
     {
-        ctx.r3.u64 = ev->Wait(timeoutMs) ? wos::kStatusSuccess : wos::kStatusTimeout;
+        const bool signalled = ev->Wait(timeoutMs);
+        wos::RecordWaitSite(callSite, ctx.r3.u32, timeoutMs, signalled);
+        ctx.r3.u64 = signalled ? wos::kStatusSuccess : wos::kStatusTimeout;
         return;
     }
 
@@ -523,8 +624,14 @@ PPC_FUNC(__imp__KeWaitForSingleObject)
 {
     WOS_IMPORT_STUB("KeWaitForSingleObject");
 
+    // Captured before the wait: ctx is the guest's live register file, and the
+    // recompiled code the waking thread runs next will overwrite lr.
+    const uint32_t callSite = uint32_t(ctx.lr);
+    const uint32_t object = ctx.r3.u32;
+
     const int64_t timeoutMs = TimeoutToMillis(base, ctx.r7.u32);
-    const bool signalled = WaitOnObject(ctx.r3.u32, timeoutMs, "KeWaitForSingleObject");
+    const bool signalled = WaitOnObject(object, timeoutMs, "KeWaitForSingleObject");
+    wos::RecordWaitSite(callSite, object, timeoutMs, signalled);
     ctx.r3.u64 = signalled ? wos::kStatusSuccess : wos::kStatusTimeout;
 }
 #endif
@@ -620,8 +727,10 @@ PPC_FUNC(__imp__KeWaitForMultipleObjects)
         return;
     }
 
+    const uint32_t callSite = uint32_t(ctx.lr);
     const uint32_t first = wos::LoadU32(base, objectArray);
-    WaitOnObject(first, 16, "KeWaitForMultipleObjects");
+    const bool signalled = WaitOnObject(first, 16, "KeWaitForMultipleObjects");
+    wos::RecordWaitSite(callSite, first, 16, signalled);
     ctx.r3.u64 = wos::kStatusSuccess;
 }
 #endif
@@ -649,6 +758,7 @@ PPC_FUNC(__imp__NtWaitForMultipleObjectsEx)
 {
     WOS_IMPORT_STUB("NtWaitForMultipleObjectsEx");
 
+    const uint32_t callSite = uint32_t(ctx.lr);
     const uint32_t count = ctx.r3.u32;
     const uint32_t handleArray = ctx.r4.u32;
     const uint32_t waitType = ctx.r5.u32;
@@ -670,13 +780,19 @@ PPC_FUNC(__imp__NtWaitForMultipleObjectsEx)
     {
         // WaitAll: every object has to be signalled.
         for (uint32_t i = 0; i < bounded; ++i)
-            WaitOnObject(wos::LoadU32(base, handleArray + i * 4), timeoutMs,
-                "NtWaitForMultipleObjectsEx");
+        {
+            const uint32_t handle = wos::LoadU32(base, handleArray + i * 4);
+            const bool signalled =
+                WaitOnObject(handle, timeoutMs, "NtWaitForMultipleObjectsEx");
+            wos::RecordWaitSite(callSite, handle, timeoutMs, signalled);
+        }
     }
     else
     {
-        WaitOnObject(wos::LoadU32(base, handleArray), timeoutMs,
-            "NtWaitForMultipleObjectsEx");
+        const uint32_t handle = wos::LoadU32(base, handleArray);
+        const bool signalled =
+            WaitOnObject(handle, timeoutMs, "NtWaitForMultipleObjectsEx");
+        wos::RecordWaitSite(callSite, handle, timeoutMs, signalled);
     }
 
     // The return value for WaitAny is the index that signalled. We waited on

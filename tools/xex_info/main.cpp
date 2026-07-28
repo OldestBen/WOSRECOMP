@@ -827,6 +827,35 @@ static int disasm(const Image& image, uint32_t addr, uint32_t count)
     const bool untilEnd = (count == 0);
     const uint32_t scanLimit = untilEnd ? 0x4000 : count;
 
+    // The "no branch still points past here" rule is necessary but not always
+    // sufficient: one forward branch to a far-away handler, or a tail call
+    // emitted as a plain `b`, keeps `furthest` high and the walk never stops.
+    // sub_82ACECF0 did exactly that and dumped the full 16384-instruction cap.
+    //
+    // .pdata is the authority on where a function ends — it is the same table
+    // XenonRecomp derives its function list from — so use the record covering
+    // `addr` as a hard ceiling. Note the records are per *unwind* region, so a
+    // function split across consecutive records would stop early; the footer
+    // says so explicitly rather than pretending the dump is complete.
+    uint32_t ceiling = 0;
+    const std::vector<PdataFunc> pdata = readPdata(image);
+    for (const auto& f : pdata)
+    {
+        if (addr >= f.begin && addr < f.end)
+        {
+            ceiling = f.end;
+            break;
+        }
+        // Past `addr` with nothing covering it: the next record starts the next
+        // function, so that is still a valid stopping point.
+        if (f.begin > addr)
+        {
+            ceiling = f.begin;
+            break;
+        }
+    }
+    const bool ceilingKnown = (ceiling != 0);
+
     // Pass 1: find the extent and collect the addresses actually branched to,
     // so pass 2 can mark exactly those. Marking "everything below the furthest
     // target" instead would flag every instruction in the range.
@@ -848,6 +877,8 @@ static int disasm(const Image& image, uint32_t addr, uint32_t count)
                 labels.push_back(t);
             }
             if (untilEnd && isTerminator(insn) && a >= furthest)
+                break;
+            if (untilEnd && ceilingKnown && end >= ceiling)
                 break;
         }
         std::sort(labels.begin(), labels.end());
@@ -895,8 +926,17 @@ static int disasm(const Image& image, uint32_t addr, uint32_t count)
         uint32_t last;
         if (readAt(end - 4, last) && isTerminator(last))
             printf("Ends on a terminator, so this is the whole function.\n");
+        else if (ceilingKnown && end >= ceiling)
+            printf("Stopped at the .pdata boundary 0x%08X, not on a terminator — "
+                   "either the function continues in the next unwind record, or a "
+                   "forward branch leaves this one.\n", ceiling);
         else
             printf("Did NOT end on a terminator — the function continues past 0x%08X.\n", end);
+
+        if (ceilingKnown)
+            printf(".pdata region for this address ends at 0x%08X.\n", ceiling);
+        else
+            printf("No .pdata record covers 0x%08X, so there was no hard ceiling.\n", addr);
     }
 
     return EXIT_SUCCESS;

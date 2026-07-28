@@ -1047,6 +1047,130 @@ hand off to each other, with both stuck on the receiving side — which points
 at a third party that should signal first, or at an event our adoption is
 tracking as a different object than the game thinks it is.
 
+## sub_82ACECF0 — the graphics thread body, read at last
+
+2026-07-28. This is the function both graphics threads block in, and the one
+piece of the chain that had never been dumped. The disassembly answers the
+structural questions; it does not, on its own, say which thread is where, and
+that gap is what the next run is instrumented to close.
+
+What the code does, read directly:
+
+    82ACECFC  mr    r26,r3              ; r26 = context pointer, the thread argument
+    82ACED10  > lis r24,-32256          ; top of the main loop
+    82ACED14  lis   r11,-5
+              ori   r11,r11,27680       ; r11 = 0xFFFFFFFFFFFB6C20
+    82ACED18  lwz   r25,0(r26)          ; r25 = device, from [ctx+0x00]
+    82ACED1C  lwz   r10,4(r26)          ; r10 = [ctx+0x04]
+    82ACED20  addi  r27,r1,80           ; r27 = &timeout on the local stack
+    82ACED24  std   r11,80(r1)          ; store the timeout
+    82ACED28  lwz   r11,376(r25)        ; r11 = [device+0x178]
+    82ACED2C  cmplw cr6,r10,r11
+    82ACED30  beq   cr6,+8
+    82ACED34  li    r27,0               ; ...otherwise r27 = NULL, i.e. INFINITE
+    82ACED38  > lwz r11,60(r26)         ; [ctx+0x3C]
+    82ACED3C  lwz   r10,56(r26)         ; [ctx+0x38]
+    82ACED44  bne   cr6,0x82acee3c      ; queue non-empty -> skip the wait, do work
+    82ACED6C  mr    r7,r27              ; r7 = timeout pointer (or NULL)
+    82ACED7C  mr    r3,r28              ; r28 = ctx+0x20 — the KEVENT
+    82ACED80  bl    __imp__KeWaitForSingleObject
+    ...
+    82ACEE34  > cmplwi cr6,r3,258       ; 258 = 0x102 = STATUS_TIMEOUT
+    82ACEE38  beq   cr6,0x82aceda4      ; -> reaches 82ACEDD8: bl 0x82AC4E48
+
+Four things follow.
+
+**The event is at context+0x20.** r28 is ctx+0x20 and that is what r3 holds at
+the wait. With the two known context pointers 0x4083FD5C and 0x4083FDAC, the
+events are 0x4083FD7C and 0x4083FDCC — exactly the pair the wait diagnostics
+have been naming since they were added. That is independent confirmation that
+the two blocked graphics threads are both in *this* loop, rather than merely
+somewhere in this function.
+
+**The timeout is ~30 ms, and only sometimes.** `lis r11,-5; ori r11,r11,27680`
+sign-extends to 0xFFFFFFFFFFFB6C20 = -302048 in 100 ns units = 30.2 ms
+relative. But r27 is replaced with NULL when `[ctx+0x04] != [device+0x178]`, so
+one of the two threads waits with a 30 ms timeout and the other waits INFINITE
+depending on a device field. This matches the observed stacks — one thread in
+`wait_for`, the other in `Cnd_wait`.
+
+**Both threads are inside the wait**, which means `[ctx+0x3C] == [ctx+0x38]`
+for both: the work queue this loop drains is empty. Neither thread is blocked
+because it is busy; both are blocked because there is nothing to do.
+
+**The frame-present branch is taken on STATUS_TIMEOUT.** 82ACEE34 compares the
+wait result against 0x102 and branches into the region that calls 0x82AC4E48
+only when it matches. So presentation does not require the event to be
+signalled at all — it requires the wait to *time out*, which the 30 ms waiter
+should be doing about thirty times a second.
+
+That last point is the problem, because `KeWaitForSingleObject` already returns
+`kStatusTimeout` on timeout, and the per-object counters already show timeouts
+happening in bulk (`ev6(manual) 950/949/0` — 949 timeouts, zero signals). If
+the reading above were the whole story, the present path would be firing. It is
+not: `VdSwap` has still never been called.
+
+So one of these is true, and the disassembly cannot distinguish them:
+
+1. The timing-out waiter is not the one at 82ACED80 — some other wait site in
+   this large function accounts for those timeouts.
+2. The branch at 82ACEE38 is reached from a path that is itself gated on
+   something else, so the comparison never runs.
+3. 0x82AC4E48 *is* being called and bails out before VdSwap.
+
+Guessing between them is exactly the move that has cost this project its worst
+turns. Two instruments were added instead.
+
+## Two instruments: wait call-site census, and guest-function tripwires
+
+2026-07-28.
+
+**Wait call-site census** (`kernel/sync.cpp`). XenonRecomp emits
+`ctx.lr = 0x<return address>` immediately before every `bl`, so inside an
+import implementation `ctx.lr` is the guest call site plus four. Every wait
+entry point now records (call site, object, timeout, timed-out?) into a bounded
+table, printed by the heartbeat as:
+
+    [waitsites] N site(s):
+        bl@0x82ACED80 -> obj 0x4083FD7C  30ms      1421 call(s), 1421 timeout(s)
+
+This answers, per run and without inference, which guest instruction each wait
+comes from, on which object, with which timeout, and whether it is timing out.
+It settles possibility 1 above directly, and it generalises: every future
+"who is waiting on this" question is now a lookup rather than a backtrace.
+
+**Guest-function tripwires** (`kernel/trace_guest.cpp`, new). The recompiler
+emits every function twice — the body as `PPC_FUNC_IMPL(__imp__sub_XXXXXXXX)`
+and a weak alias `sub_XXXXXXXX` — and both direct calls and the indirect
+dispatch table go through the weak name. A strong definition of that name in
+our own code therefore intercepts the call, and can forward to the untouched
+original. This is the only way to observe that control reached an address whose
+code calls no imports.
+
+Two are placed: `sub_82AC4E48` (the frame-present path, three known callers)
+and `sub_82ACECF0` (the graphics thread body, which also prints its context
+pointer on entry). Together they settle possibility 3: if the present tripwire
+fires and VdSwap still does not, the fault is inside 0x82AC4E48; if it never
+fires, the branch is never taken and the fault is upstream.
+
+If the file ever fails to link with an unresolved `__imp__sub_XXXXXXXX`, that
+address is not a function boundary the analyser found — delete that tripwire
+rather than forcing it. Nothing depends on the file.
+
+## --disasm now stops at the .pdata boundary
+
+2026-07-28. `--disasm 0x82ACECF0` ran to the full 16384-instruction cap again,
+after the `isCallInsn` fix. That fix was correct but incomplete: the walk stops
+at a terminator only once no branch seen so far still targets an address past
+it, and a single forward branch to a distant handler — or a tail call emitted
+as a plain `b` — keeps that horizon permanently ahead of the cursor.
+
+`.pdata` is the authority here; it is the same table XenonRecomp derives its
+function list from. The walk now also stops at the end of the `.pdata` record
+covering the start address, and the footer says which of the two rules ended
+it, so a dump truncated at an unwind-record split is visible as such rather
+than passing for a complete function.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

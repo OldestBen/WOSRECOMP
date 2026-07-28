@@ -46,8 +46,21 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
   `game.XEPACK`.
 - **The frame-present path is never reached.** `sub_82AC4E48` calls
   `VdGetSystemCommandBuffer` and then `VdSwap`; implementing the former did
-  not cause either to fire, so the function itself is not being called. Its
-  callers are the thing to find next (`xex_info --xrefs 0x82AC4E48`).
+  not cause either to fire. `--xrefs` gives it three callers — `0x82939390`,
+  `0x82AB948C` and `0x82ACEDD8`, the last inside `sub_82ACECF0` itself — so
+  presentation is gated behind the graphics threads' wait.
+- **`sub_82ACECF0` has now been read.** Its loop waits on the KEVENT at
+  context+0x20 (0x4083FD7C and 0x4083FDCC, confirming the wait diagnostics),
+  with a ~30 ms timeout on one thread and INFINITE on the other, and it takes
+  the present branch on `STATUS_TIMEOUT` — *not* on a signal. Timeouts are
+  happening in bulk and the present path still never fires, so the reading is
+  incomplete in a way the disassembly cannot settle.
+- **Instrumented rather than guessed.** Two measurements are in place for the
+  next run: a wait call-site census (every wait now records its guest `bl`
+  address from `ctx.lr`, printed by the heartbeat), and guest-function
+  tripwires on `sub_82AC4E48` and `sub_82ACECF0` in `kernel/trace_guest.cpp`.
+  Between them the next run says which wait site the timeouts come from and
+  whether the present function is entered at all.
 
 Full evidence for each of these is in
 [`docs/05-findings-log.md`](docs/05-findings-log.md).
@@ -59,20 +72,59 @@ Full evidence for each of these is in
 2. **Keep following the import trace.** It is a queue, not a checklist: the
    game cannot ask for anything new until what it already asked for works.
    Each round implements the next few and the trace grows.
-3. **Archive loading** is the near-term milestone — `amalga.toc` plus
+3. **Read the next run's `[waitsites]` block and tripwire lines.** They
+   decide whether the present path is unreached or reached-and-bailing, which
+   are different bugs with different fixes.
+4. **Archive loading** is the near-term milestone — `amalga.toc` plus
    `packs/` is where the actual game data lives, so directory enumeration
    and larger reads come next.
-4. Decide whether to revisit the 33 known-bad switch sites. They compile but
+5. Decide whether to revisit the 33 known-bad switch sites. They compile but
    emit wrong control flow, and now that code genuinely runs they can cause
    misbehaviour that looks like a logic bug. See the alignment analysis in
    the findings log.
-5. Locate `setjmp`/`longjmp` (look for `RtlUnwind` callers) if error-path
+6. Locate `setjmp`/`longjmp` (look for `RtlUnwind` callers) if error-path
    control flow misbehaves.
-6. Then the big one: GPU via XenosRecomp, plus audio, input and UI.
+7. Then the big one: GPU via XenosRecomp, plus audio, input and UI.
 
 ---
 
 ## Log
+
+### 2026-07-28 (23) — sub_82ACECF0 read; present gated on a timeout that already happens
+
+Dumped the graphics thread body, the one function in the chain never looked
+at. It answers the structural questions cleanly: the KEVENT is at
+context+0x20 (so 0x4083FD7C and 0x4083FDCC — matching the wait diagnostics
+exactly), one thread waits ~30 ms and the other INFINITE depending on
+`[ctx+0x04] == [device+0x178]`, both are inside the wait so the work queue is
+empty, and the branch to the present path at 82ACEE38 is taken on
+`STATUS_TIMEOUT`, not on a signal.
+
+That last one should have been the answer, and it is not: we already return
+0x102 on timeout and the counters already show ~950 timeouts against zero
+signals, yet `VdSwap` has still never been called. Three explanations remain
+and the disassembly cannot choose between them — the timeouts may come from a
+different wait site in the same large function, the comparison may sit behind
+another gate, or 0x82AC4E48 may be running and bailing before VdSwap.
+
+Rather than pick one, added two measurements that decide it:
+
+- **Wait call-site census** (`kernel/sync.cpp`). XenonRecomp sets
+  `ctx.lr` to the return address before every `bl`, so an import
+  implementation can name its own guest call site for free. Every wait now
+  records (call site, object, timeout, timed-out?) and the heartbeat prints
+  it. This is a general capability, not a one-off probe.
+- **Guest-function tripwires** (`kernel/trace_guest.cpp`, new). A strong
+  definition of `sub_XXXXXXXX` overrides the recompiler's weak alias and can
+  forward to `__imp__sub_XXXXXXXX`, so we can observe that control reached an
+  address whose code calls no imports. Placed on `sub_82AC4E48` and
+  `sub_82ACECF0`.
+
+Also fixed `--disasm` running to its 16384-instruction cap again. The earlier
+`isCallInsn` fix was right but incomplete: one forward branch to a distant
+handler keeps the "has anything branched past here" horizon permanently ahead
+of the cursor. It now also stops at the `.pdata` record boundary, and the
+footer says which rule ended the walk.
 
 ### 2026-07-26 (21) — Watchdog delivers; graphics interrupt called with wrong arguments
 
