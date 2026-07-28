@@ -622,3 +622,63 @@ PPC_FUNC(__imp__KeWaitForMultipleObjects)
     ctx.r3.u64 = wos::kStatusSuccess;
 }
 #endif
+
+#ifdef WOS_IMPL_NtWaitForMultipleObjectsEx
+// NTSTATUS NtWaitForMultipleObjectsEx(ULONG count, HANDLE* handles,
+//     WAIT_TYPE waitType, KPROCESSOR_MODE mode, BOOLEAN alertable,
+//     PLARGE_INTEGER timeout);
+//   r3 = count, r4 = handle array, r5 = waitType (0 = WaitAll, 1 = WaitAny),
+//   r6 = mode, r7 = alertable, r8 = timeout
+//
+// This was an unimplemented stub, so it returned success instantly — the same
+// failure that has bitten this project more than once: a stub that returns
+// success to a *wait* inverts the call's timing semantics and turns a block
+// into a busy-spin. A run measured it at 11,720,555 calls in five seconds,
+// lockstep with NtSetEvent and NtReleaseMutant, i.e. one loop spinning about
+// 4.7 million times a second and doing no work.
+//
+// WaitAll waits on every object in turn; WaitAny waits on the first. Waiting
+// on the first is a stated shortcut, matching KeWaitForMultipleObjects above:
+// it blocks, which is the property that actually matters, but a game that
+// expects to be woken by the *second* handle will wake late. If something
+// starts behaving as though the wrong object signalled it, look here first.
+PPC_FUNC(__imp__NtWaitForMultipleObjectsEx)
+{
+    WOS_IMPORT_STUB("NtWaitForMultipleObjectsEx");
+
+    const uint32_t count = ctx.r3.u32;
+    const uint32_t handleArray = ctx.r4.u32;
+    const uint32_t waitType = ctx.r5.u32;
+    const int64_t timeoutMs = TimeoutToMillis(base, ctx.r8.u32);
+
+    if (count == 0 || handleArray == 0)
+    {
+        // Nothing to wait on. Sleep briefly rather than returning instantly,
+        // so a caller that loops on this cannot spin a core.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ctx.r3.u64 = wos::kStatusSuccess;
+        return;
+    }
+
+    // Bound the count: a garbage value here would otherwise walk guest memory.
+    const uint32_t bounded = (count > 64) ? 64 : count;
+
+    if (waitType == 0)
+    {
+        // WaitAll: every object has to be signalled.
+        for (uint32_t i = 0; i < bounded; ++i)
+            WaitOnObject(wos::LoadU32(base, handleArray + i * 4), timeoutMs,
+                "NtWaitForMultipleObjectsEx");
+    }
+    else
+    {
+        WaitOnObject(wos::LoadU32(base, handleArray), timeoutMs,
+            "NtWaitForMultipleObjectsEx");
+    }
+
+    // The return value for WaitAny is the index that signalled. We waited on
+    // the first, so report that rather than inventing an index we did not
+    // observe.
+    ctx.r3.u64 = wos::kStatusSuccess;
+}
+#endif

@@ -68,6 +68,7 @@
 // per five seconds -- five million loop iterations a second.
 #define WOS_IMPL_KeWaitForSingleObject 1
 #define WOS_IMPL_KeWaitForMultipleObjects 1
+#define WOS_IMPL_NtWaitForMultipleObjectsEx 1
 #define WOS_IMPL_KeSetEvent 1
 #define WOS_IMPL_KeResetEvent 1
 #define WOS_IMPL_KePulseEvent 1
