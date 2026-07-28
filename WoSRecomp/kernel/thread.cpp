@@ -269,6 +269,46 @@ PPC_FUNC(__imp__NtResumeThread)
 }
 #endif
 
+#ifdef WOS_IMPL_KeResumeThread
+// ULONG KeResumeThread(PKTHREAD thread);   // r3
+//
+// The kernel-mode counterpart of NtResumeThread: it takes an object pointer
+// rather than a handle, and returns the previous suspend count instead of an
+// NTSTATUS.
+//
+// This was unimplemented, and it cost an entire thread. A run showed:
+//
+//     [thread] created 4106: entry 0x829F4C80, ... flags 0x10000001 (suspended)
+//     [import  67] KeResumeThread
+//
+// and then no "[thread] 4106 starting" line, with thread 4106 absent from all
+// eleven stacks in the watchdog dump. Created suspended, resumed through a
+// stub that did nothing, never ran. Four of the game's thirteen KeSetEvent
+// call sites sit around that thread's entry point, so a thread that never
+// starts is a plausible reason events go unsignalled.
+//
+// ObjectFromAny resolves either a handle or a guest-visible object address,
+// which is what makes the pointer form work here.
+PPC_FUNC(__imp__KeResumeThread)
+{
+    WOS_IMPORT_STUB("KeResumeThread");
+
+    auto obj = wos::ObjectFromAny(ctx.r3.u32);
+    auto* thread = dynamic_cast<wos::ThreadObject*>(obj.get());
+
+    if (thread == nullptr)
+    {
+        printf("[thread] KeResumeThread on unknown object 0x%08X — nothing resumed\n",
+            ctx.r3.u32);
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    thread->Release();
+    ctx.r3.u64 = 1;   // previous suspend count
+}
+#endif
+
 #ifdef WOS_IMPL_NtSuspendThread
 PPC_FUNC(__imp__NtSuspendThread)
 {

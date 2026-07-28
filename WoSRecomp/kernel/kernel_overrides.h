@@ -82,6 +82,7 @@
 // ---------------------------------------------------------------------------
 #define WOS_IMPL_ExCreateThread 1
 #define WOS_IMPL_NtResumeThread 1
+#define WOS_IMPL_KeResumeThread 1
 #define WOS_IMPL_NtSuspendThread 1
 #define WOS_IMPL_KeSetAffinityThread 1
 #define WOS_IMPL_KeSetBasePriorityThread 1
