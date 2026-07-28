@@ -396,6 +396,47 @@ void DumpRingOnce(uint8_t* base, uint32_t wptr)
            "        GPU fence to advance; see the comment in video.cpp)\n");
 }
 
+// The command processor: consume the ring as fast as the game fills it.
+//
+// This used to run on the vblank thread, which made the GPU exactly as fast as
+// the display — 60 consumptions a second. Executing the fence writes proved
+// the mechanism works (the fence went from stuck at 1 to tracking the CPU
+// four behind, 0x54f against 0x553), but four behind is still behind, and the
+// game's D3D layer measures that gap and calls it a hang.
+//
+// A real GPU does not wait for vblank to read its ring, so neither should
+// this. Polling the write pointer on its own thread decouples the two: the
+// display heartbeat stays at 60 Hz for the interrupt callback, and command
+// consumption runs at whatever rate the game submits.
+//
+// The poll interval is a compromise. Spinning would close the gap fastest and
+// burn a core doing it; 200 microseconds is roughly 80x more responsive than
+// a vblank tick while still sleeping most of the time.
+void CommandProcessorThread(uint8_t* base)
+{
+    while (g_vblankRunning.load(std::memory_order_relaxed))
+    {
+        const uint32_t wptr = wos::LoadU32(base, kGpuWritePointerReg);
+
+        // Consume before publishing the read pointer, so the two agree: the
+        // read pointer we publish means "everything up to here has been
+        // processed", not "will be shortly".
+        ConsumeRing(base, wptr);
+
+        const uint32_t rptrPtr = g_rptrWriteBackPtr.load(std::memory_order_relaxed);
+        if (rptrPtr != 0)
+            wos::StoreU32(base, rptrPtr, wptr);
+
+        // The game reads CP_RB_RPTR out of the register window too — its hang
+        // dump printed "CP_RB_RPTR: 0x00000000" against a non-zero write
+        // pointer, which is exactly the picture of a GPU that has consumed
+        // nothing.
+        wos::StoreU32(base, kGpuReadPointerReg, wptr);
+
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+}
+
 // Stands in for the display's vertical blank.
 //
 // Source 0 is vblank, 1 is a buffer swap. Firing only vblank is the
@@ -422,25 +463,8 @@ void VblankThread(uint8_t* base)
         //
         // The write pointer lives in the GPU register window. The game wrote
         // to guest 0x7FC80714 once during init, which is CP_RB_WPTR.
-        const uint32_t wptr = wos::LoadU32(base, kGpuWritePointerReg);
-
-        // Consume before publishing the read pointer, so the two agree: the
-        // read pointer we publish means "everything up to here has been
-        // processed", not "will be shortly".
-        ConsumeRing(base, wptr);
-
-        const uint32_t rptrPtr = g_rptrWriteBackPtr.load(std::memory_order_relaxed);
-        if (rptrPtr != 0)
-            wos::StoreU32(base, rptrPtr, wptr);
-
-        // The game reads CP_RB_RPTR out of the register window too — its hang
-        // dump printed "CP_RB_RPTR: 0x00000000" against a write pointer of
-        // 0x43, which is exactly the picture of a GPU that has consumed
-        // nothing. Keep the register consistent with the write-back.
-        wos::StoreU32(base, kGpuReadPointerReg, wptr);
-
-        ReportRingProgress(base, rptrPtr);
-        DumpRingOnce(base, wptr);
+        ReportRingProgress(base, g_rptrWriteBackPtr.load(std::memory_order_relaxed));
+        DumpRingOnce(base, wos::LoadU32(base, kGpuWritePointerReg));
 
         const uint32_t callback = g_interruptCallback.load(std::memory_order_relaxed);
         if (callback == 0)
@@ -513,7 +537,9 @@ PPC_FUNC(__imp__VdSetGraphicsInterruptCallback)
     if (ctx.r3.u32 != 0 && !g_vblankRunning.exchange(true))
     {
         std::thread(VblankThread, base).detach();
+        std::thread(CommandProcessorThread, base).detach();
         printf("[video] vblank thread started at ~60 Hz\n");
+        printf("[video] command processor started (200 us poll)\n");
     }
 }
 #endif
