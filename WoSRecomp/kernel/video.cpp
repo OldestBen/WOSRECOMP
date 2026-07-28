@@ -402,11 +402,16 @@ PPC_FUNC(__imp__VdGetCurrentDisplayInformation)
 PPC_FUNC(__imp__VdInitializeRingBuffer)
 {
     WOS_IMPORT_STUB("VdInitializeRingBuffer");
-    g_ringPhysical = ctx.r3.u32;
-    g_ringVirtual = (ctx.r3.u32 != 0) ? PhysicalToVirtual(ctx.r3.u32) : 0;
-    g_ringSize = (ctx.r4.u32 < 32) ? (1u << ctx.r4.u32) : 0;
+    const uint32_t physical = ctx.r3.u32;
+    const uint32_t virt = (physical != 0) ? PhysicalToVirtual(physical) : 0;
+    const uint32_t size = (ctx.r4.u32 < 32) ? (1u << ctx.r4.u32) : 0;
+
+    g_ringPhysical = physical;
+    g_ringVirtual = virt;
+    g_ringSize = size;
+
     printf("[video] ring buffer: physical 0x%08X -> virtual 0x%08X, size 2^%u = 0x%X bytes\n",
-        g_ringPhysical, g_ringVirtual, ctx.r4.u32, g_ringSize);
+        physical, virt, ctx.r4.u32, size);
     ctx.r3.u64 = 0;
 }
 #endif
