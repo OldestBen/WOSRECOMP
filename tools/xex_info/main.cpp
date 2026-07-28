@@ -986,7 +986,8 @@ static uint32_t backedSize(const Image& image, const Section& s)
 // unrelated structure looks identical. Callers get the containing function so
 // they can judge; for this game the D3D code clusters in 0x82AB..0x82AD, which
 // makes the real hits obvious.
-static int fieldRefs(const Image& image, uint32_t displacement, bool storesOnly)
+static int fieldRefs(const Image& image, uint32_t displacement, bool storesOnly,
+                     uint32_t context)
 {
     struct Form { uint32_t op; const char* name; bool isStore; };
     // The D-form integer loads and stores. Floating-point and the DS-form
@@ -1051,6 +1052,30 @@ static int fieldRefs(const Image& image, uint32_t displacement, bool storesOnly)
                 printf("  in sub_%08X+0x%X", fn, site - fn);
             printf("\n");
             ++hits;
+
+            // The address of a store says nothing about the VALUE it writes.
+            // For a flags byte that is the only question worth asking — the
+            // difference between `ori r9,r9,32` and `ori r9,r9,2` is the
+            // difference between the field we are hunting and an unrelated
+            // one, and it is invisible in the store instruction itself. So
+            // print the instructions that produced the stored register and let
+            // the code answer instead of the reader guessing.
+            for (uint32_t k = context; k > 0; --k)
+            {
+                const uint32_t backOff = k * 4;
+                if (backOff > off)
+                    continue;
+                const uint32_t prev = site - backOff;
+                ppc_insn before{};
+                ppc::Disassemble(s.data + (off - backOff), prev, before);
+                printf("            %08X  %-10s %s\n", prev,
+                    before.opcode ? before.opcode->name : ".long",
+                    before.opcode ? before.op_str : "<undecodable>");
+            }
+            if (context > 0)
+                printf("            %08X  %-10s %s   <-- the store\n\n", site,
+                    decoded.opcode ? decoded.opcode->name : ".long",
+                    decoded.opcode ? decoded.op_str : "<undecodable>");
         }
     }
 
@@ -1169,11 +1194,14 @@ int main(int argc, char** argv)
         printf("  --disasm <addr> [count]\n");
         printf("                   disassemble guest code at an address; count 0 (or\n");
         printf("                   omitted) runs to the end of the function\n");
-        printf("  --field <disp> [--stores]\n");
+        printf("  --field <disp> [--stores] [--context N]\n");
         printf("                   every load/store with this displacement — the\n");
         printf("                   way to find who touches a struct field, which\n");
         printf("                   --xrefs cannot do (a field access encodes no\n");
-        printf("                   address, only a base register and an offset)\n");
+        printf("                   address, only a base register and an offset).\n");
+        printf("                   --context N prints the N instructions before\n");
+        printf("                   each hit, which is the only way to see what\n");
+        printf("                   value a store actually writes\n");
         printf("  --xrefs <addr>   list every branch to, and stored pointer to, an\n");
         printf("                   address — i.e. who calls or references it\n");
         return EXIT_SUCCESS;
@@ -1187,6 +1215,7 @@ int main(int argc, char** argv)
     bool wantDisasm = false, wantXrefs = false;
     bool wantField = false, fieldStoresOnly = false;
     uint32_t disasmAddr = 0, disasmCount = 0, xrefsAddr = 0, fieldDisp = 0;
+    uint32_t fieldContext = 0;
     for (int i = 2; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--disasm") == 0)
@@ -1225,10 +1254,29 @@ int main(int argc, char** argv)
             }
             ++i;
             wantField = true;
-            if (i + 1 < argc && std::strcmp(argv[i + 1], "--stores") == 0)
+            // Trailing modifiers, in any order: --stores narrows to writes,
+            // --context N shows the N instructions that computed the value.
+            while (i + 1 < argc)
             {
-                fieldStoresOnly = true;
-                ++i;
+                if (std::strcmp(argv[i + 1], "--stores") == 0)
+                {
+                    fieldStoresOnly = true;
+                    ++i;
+                    continue;
+                }
+                if (std::strcmp(argv[i + 1], "--context") == 0)
+                {
+                    if (i + 2 >= argc || !parseAddr(argv[i + 2], fieldContext))
+                    {
+                        fprintf(stderr, "--context requires a count, e.g. --context 6\n");
+                        return EXIT_FAILURE;
+                    }
+                    if (fieldContext > 32)
+                        fieldContext = 32;
+                    i += 2;
+                    continue;
+                }
+                break;
             }
             continue;
         }
@@ -1341,7 +1389,7 @@ int main(int argc, char** argv)
         return xrefs(image, xrefsAddr);
 
     if (wantField)
-        return fieldRefs(image, fieldDisp, fieldStoresOnly);
+        return fieldRefs(image, fieldDisp, fieldStoresOnly, fieldContext);
 
     if (stubsOut != nullptr)
         return emitStubs(image, stubsOut);

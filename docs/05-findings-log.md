@@ -1388,6 +1388,39 @@ an opcode extension rather than displacement, and the floating-point forms are
 not covered. Neither matters for a byte-sized flag; both would need handling
 before trusting this for 64-bit fields.
 
+## sub_82AB99E0 sets bit 5, not bit 1 — and why I keep guessing
+
+2026-07-28. `--field 0x2ABD --stores` flagged a store at 82AB9A00 with no
+containing .pdata function, sitting in the same address band as the graphics
+interrupt callback. I called it a lead. It is not one:
+
+    82AB99E0  lwz  r10,16728(r3)     ; [ctx+0x4158]
+    82AB99E4  lbz  r9,10941(r3)      ; [ctx+0x2ABD]
+    82AB99E8  addi r11,r10,4800      ; r10 + 0x12C0
+    82AB99EC  ori  r9,r9,32          ; bit 5 (0x20), NOT bit 1
+    82AB99F0  addi r8,r11,-160
+    82AB99F4  stw  r11,52(r3)        ; [ctx+0x34]
+    82AB99F8  stw  r10,48(r3)        ; [ctx+0x30]
+    82AB99FC  stw  r8,56(r3)         ; [ctx+0x38]
+    82AB9A00  stb  r9,10941(r3)
+    82AB9A04  blr
+
+A five-instruction leaf that repoints the command-buffer cursor, base and
+limit at [ctx+0x4158]+0x12C0 and flags that it has done so. [ctx+0x30] is the
+same field every packet emitter walks with `stwu r11,4(r3)`, and 0x20 is the
+bit tested at 82AC1550 and 82AC20D0. Nothing to do with the wait.
+
+The proximity argument was worthless, and it is the third time this session
+that "it is near the right address" has produced a wrong answer. The reason it
+keeps happening is a real gap in the tooling rather than a lapse of care: the
+`--field` output gives the *location* of a store and nothing about the *value*
+it writes, and for a flags byte the value is the entire question. `ori r9,r9,32`
+and `ori r9,r9,2` are indistinguishable in that listing.
+
+So `--field` now takes `--context N` and prints the N instructions that
+produced the stored register. Twenty candidate sites become one dump that
+answers which of them touches bit 1, with no inference in between.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
