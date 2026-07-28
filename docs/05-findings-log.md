@@ -1019,6 +1019,34 @@ out-parameter stub that reports success and fills in nothing.
 `VdSwap` is reached from here, which is the call that has never fired in any
 run so far.
 
+## KeResumeThread — fixed, but not the signaller
+
+2026-07-28. `KeResumeThread` was unimplemented, so guest thread 4106 (entry
+0x829F4C80) was created with CREATE_SUSPENDED, resumed through a stub that did
+nothing, and never ran in any run before this. Implementing it works: the run
+now shows `[thread] 4106 starting at guest 0x829F4C80`, the thread adopts two
+further guest-embedded events (0x82F7700C, 0x82F76FFC), and returns.
+
+**It does not signal 0x4083FDCC.** The hypothesis that it might came from four
+KeSetEvent call sites sitting near its entry point; that was proximity, not
+evidence, and it was wrong. The graphics threads remain parked at
+sub_82ACECF0 +0x4CA. Recorded because the negative result narrows the search:
+whatever signals that event, it is not this thread.
+
+What the KeSetEvent xrefs actually give (13 sites total):
+
+    829F40C0  829F482C  829F4D30  829F4E48   near thread 4106's entry
+    82ACEED8  82ACF404                       inside sub_82ACECF0 itself
+    82B1486C  82B1492C  82B14A78  82B14AE4  82B14BB8
+    82B1C0FC  82B1D0E0
+
+The two inside sub_82ACECF0 are the interesting pair: +0x1E8 (before the wait
+at +0x4CA, so both graphics threads have already passed it) and +0x714 (after
+it, so neither has reached it). That is the shape of two threads meant to
+hand off to each other, with both stuck on the receiving side — which points
+at a third party that should signal first, or at an event our adoption is
+tracking as a different object than the game thinks it is.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
