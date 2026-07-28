@@ -65,6 +65,7 @@ inline char* GuestPtr(uint8_t* base, uint32_t addr)
 // Xbox 360 NTSTATUS values we actually return.
 constexpr uint32_t kStatusSuccess           = 0x00000000u;
 constexpr uint32_t kStatusTimeout           = 0x00000102u;
+constexpr uint32_t kStatusPending           = 0x00000103u;
 constexpr uint32_t kStatusNoMemory          = 0xC0000017u;
 constexpr uint32_t kStatusInvalidParameter  = 0xC000000Du;
 constexpr uint32_t kStatusInvalidHandle     = 0xC0000008u;

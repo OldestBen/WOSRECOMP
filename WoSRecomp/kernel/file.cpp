@@ -403,6 +403,8 @@ PPC_FUNC(__imp__NtSetInformationFile)
 }
 #endif
 
+namespace wos { void ReportRequestBlock(uint8_t* base, const char* when); }
+
 #ifdef WOS_IMPL_NtReadFile
 // NTSTATUS NtReadFile(HANDLE FileHandle,     // r3
 //                     HANDLE Event,          // r4
@@ -482,12 +484,31 @@ PPC_FUNC(__imp__NtReadFile)
     // that issued the read, which is what the guest's own thread-affine state
     // expects.
     if (apcRoutine != 0)
+    {
+        wos::ReportRequestBlock(base, "at queue");
         wos::QueueThreadApc(apcRoutine, apcContext, ioStatusBlock);
+    }
 
     printf("[file] read %zu of 0x%X bytes from \"%s\" into guest 0x%08X\n",
         read, length, file->guestPath.c_str(), buffer);
 
-    ctx.r3.u64 = (read == 0 && length != 0) ? kStatusEndOfFile : wos::kStatusSuccess;
+    // An async read — one carrying a completion APC — returns STATUS_PENDING on
+    // the real kernel, and the completion arrives later. We were returning
+    // SUCCESS, which tells the caller the transfer finished synchronously and
+    // that no APC is coming.
+    //
+    // That is a candidate for why delivering the APC changes nothing. The
+    // completion at guest 0x82965488 signals only when the request object is in
+    // state 1; states 2 and 3 return silently. A caller told "already done"
+    // would reasonably advance that state itself, and our APC then arrives to
+    // find a request it is no longer allowed to complete — which looks exactly
+    // like the APC doing nothing.
+    if (read == 0 && length != 0)
+        ctx.r3.u64 = kStatusEndOfFile;
+    else if (apcRoutine != 0)
+        ctx.r3.u64 = wos::kStatusPending;
+    else
+        ctx.r3.u64 = wos::kStatusSuccess;
 }
 #endif
 
@@ -517,6 +538,32 @@ thread_local std::vector<PendingApc> t_apcQueue;
 
 namespace wos
 {
+
+// The request block the completion chain walks.
+//
+// 0x829688C0 — the ApcContext the trampoline calls — does:
+//     addi r31,r11,6860   ; r31 = 0x82F71ACC
+//     lwz  r3,24(r31)     ; [+0x18]
+//     bl   0x82968498     ; the real completion
+//     stw  r11,16(r31)    ; [+0x10] = 0
+//
+// and the Game Master takes its first wait handle from [+0x14] of the same
+// block. So these three fields are the whole handshake, and whether they are
+// populated when the APC runs is the question that decides whether the
+// ordering is right.
+void ReportRequestBlock(uint8_t* base, const char* when)
+{
+    constexpr uint32_t kBlock = 0x82F71ACC;
+    static unsigned s_logged = 0;
+    if (s_logged >= 8)
+        return;
+    ++s_logged;
+    printf("[file] request block %s: [+0x10]=0x%08X [+0x14]=0x%08X [+0x18]=0x%08X\n",
+        when,
+        LoadU32(base, kBlock + 0x10),
+        LoadU32(base, kBlock + 0x14),
+        LoadU32(base, kBlock + 0x18));
+}
 
 void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
 {
@@ -554,6 +601,8 @@ void DeliverPendingApcs(PPCContext& ctx, uint8_t* base)
             printf("[file] delivering queued APC 0x%08X -> 0x%08X, context 0x%08X\n",
                 apc.routine, target, apc.context);
         }
+
+        ReportRequestBlock(base, "at delivery");
 
         const PPCContext saved = ctx;
         ctx.r3.u64 = apc.context;

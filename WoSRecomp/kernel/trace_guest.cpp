@@ -24,6 +24,7 @@
 #include "guest.h"
 
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 
 namespace
@@ -86,4 +87,57 @@ PPC_FUNC(sub_82ACECF0)
            "event 0x%08X\n", ctx.r3.u32, ctx.r3.u32 + 0x20);
     Trip("sub_82ACECF0", g_graphicsThreadBody, uint32_t(ctx.lr) - 4);
     __imp__sub_82ACECF0(ctx, base);
+}
+
+// ---------------------------------------------------------------------------
+// The I/O completion chain.
+//
+// The deadlock is fully mapped except for one link. Two threads wait on five
+// events; the only code that signals them is five instructions at 0x82965534,
+// guarded by two branches, reached from the request-completion function at
+// 0x82965488. The APC that should drive that path is now delivered correctly
+// and still nothing signals — so the open question is whether the completion
+// runs at all.
+//
+// Both of these are proven `bl` targets (--xrefs found four callers of
+// 0x82965488, and 0x829688C0 calls 0x82968498 directly), so both resolve.
+//
+// sub_82968498 is what the ApcContext calls. sub_82965488 is the completion
+// itself: it looks a request handle up in a table of 112-byte objects and
+// signals only if that object is in state 1.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+std::atomic<uint64_t> g_ioCompletion{0};
+std::atomic<uint64_t> g_requestComplete{0};
+} // namespace
+
+PPC_FUNC_IMPL(__imp__sub_82968498);
+PPC_FUNC(sub_82968498)
+{
+    // r3 = the value read from [0x82F71AE4], r4 = bytes, r5 = error.
+    // If r3 is zero the request block was never populated, which would say the
+    // ordering is still wrong rather than the completion being unreachable.
+    const uint64_t n = g_ioCompletion.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 4)
+        printf("[trace] io completion sub_82968498 #%llu: handle 0x%08X, "
+               "bytes %u, error 0x%08X\n",
+            (unsigned long long)n, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32);
+    __imp__sub_82968498(ctx, base);
+}
+
+PPC_FUNC_IMPL(__imp__sub_82965488);
+PPC_FUNC(sub_82965488)
+{
+    // r3 = the request handle. The state that decides whether it signals lives
+    // at [object + 0x34], and the object is found through the table at
+    // 0x82F719EC — so print the handle and let the next dump resolve it if this
+    // turns out to be reached with a handle that fails validation.
+    const uint64_t n = g_requestComplete.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 8)
+        printf("[trace] request-complete sub_82965488 #%llu: handle 0x%08X "
+               "(from guest 0x%08X)\n",
+            (unsigned long long)n, ctx.r3.u32, uint32_t(ctx.lr) - 4);
+    __imp__sub_82965488(ctx, base);
 }

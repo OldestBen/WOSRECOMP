@@ -2165,6 +2165,44 @@ Continuing to adjust delivery around a completion that has never been observed
 executing is the same mistake as the graphics detour: refining a mechanism
 instead of confirming the thing it feeds.
 
+## Four measurements and one candidate fix, in one build
+
+2026-07-28. The APC is delivered on the right thread at the right point and
+still nothing signals, so the next round stops refining delivery and instead
+instruments the completion itself — plus one behaviour change that is a real
+candidate rather than another mechanism.
+
+**The candidate: NtReadFile returns STATUS_PENDING for async reads.** We
+returned SUCCESS, which tells the caller the transfer finished synchronously
+and that no APC is coming. The completion at 0x82965488 signals **only** when
+the request object is in state 1; states 2 and 3 return silently. A caller told
+"already done" would reasonably advance that state itself, and our APC then
+arrives to find a request it is no longer permitted to complete — which is
+indistinguishable from the APC doing nothing, and matches every observation so
+far. STATUS_PENDING is what the real kernel returns when an APC is supplied.
+
+**The measurements, chosen so any outcome is conclusive:**
+
+- The request block at 0x82F71ACC — fields +0x10, +0x14, +0x18 — printed both
+  when the APC is queued and when it is delivered. 0x829688C0 reads [+0x18] and
+  the Game Master takes its first wait handle from [+0x14], so these three
+  fields are the entire handshake. If [+0x18] is zero at delivery, the ordering
+  is still wrong; if it is populated, the ordering is right and the fault is
+  downstream.
+- A tripwire on sub_82968498, what the ApcContext calls, printing the handle,
+  byte count and error it receives.
+- A tripwire on sub_82965488, the request completion itself, printing the
+  handle and its guest call site.
+
+Between them: if neither tripwire fires, the completion is unreachable and the
+APC chain is not the route. If sub_82968498 fires but sub_82965488 does not,
+the fault is inside 0x829688C0's arguments. If both fire and nothing signals,
+the request object is in the wrong state — and that is what STATUS_PENDING is
+meant to fix.
+
+Both tripwire addresses are proven `bl` targets, so neither should fail to
+link; if one does, deleting it is safe and nothing depends on the file.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
