@@ -55,6 +55,11 @@ constexpr uint32_t kGpuRegisterBase = 0x7FC80000;
 constexpr uint32_t kGpuWritePointerReg = kGpuRegisterBase + 0x714;
 constexpr uint32_t kGpuReadPointerReg  = kGpuRegisterBase + 0x710;
 
+// The register the graphics interrupt callback tests before doing anything on
+// a vblank. Found by disassembling the callback rather than by guessing —
+// see the comment at the call site.
+constexpr uint32_t kGpuVblankStatusReg = kGpuRegisterBase + 0x6544;
+
 // Every address the game hands the video driver is a PHYSICAL address.
 //
 // MmGetPhysicalAddress is `addr & 0x1FFFFFFF` — it strips the alias window and
@@ -511,20 +516,36 @@ void VblankThread(uint8_t* base)
             s_interruptPcr = wos::CreateThreadPcr(base);
         ctx.r13.u64 = s_interruptPcr;
 
-        // THREE arguments, not two: (source, cpu, userdata).
+        // TWO arguments: (source, context). Context goes in r4.
         //
-        // This was passing userdata in r4 — the *cpu* slot — leaving r5
-        // holding whatever was there before. The callback would then use a
-        // garbage pointer as its context, which is almost certainly what the
-        // unexplained reads of guest 0x59000000 and 0x66020000 were: a
-        // dereference of a value that was never a pointer.
+        // I had this as three arguments — (source, cpu, userdata) — on the
+        // theory that the middle slot was a CPU number. Reading guest
+        // 0x82AB9840 settles it:
         //
-        // The consequence is that the callback did nothing useful, so the two
-        // graphics threads waiting on their ctx+0x20 events were never woken,
-        // and the main thread spun in the graphics layer waiting on them.
+        //     82AB984C  mr r31,r4         ; context
+        //     82AB9850  cmplwi cr6,r3,1   ; source
+        //
+        // r4 is the context and there is no cpu argument. The three-argument
+        // version put zero in r4, so every access through r31 in the callback
+        // — [r31+0x2A94], [r31+0x2A98] — read the zero page, and the vblank
+        // handler was invoked with a null device. That was my error, and it
+        // silently disabled the callback for every run since.
         ctx.r3.u64 = 0;                                             // source: vblank
-        ctx.r4.u64 = 0;                                             // cpu number
-        ctx.r5.u64 = g_interruptUserData.load(std::memory_order_relaxed);
+        ctx.r4.u64 = g_interruptUserData.load(std::memory_order_relaxed);
+
+        // The source-0 path is gated on a GPU register:
+        //
+        //     82AB98D8  lis r11,32712        ; 0x7FC80000
+        //     82AB98DC  lwz r11,25924(r11)   ; register at 0x7FC86544
+        //     82AB98E0  clrlwi. r11,r11,31   ; bit 0
+        //     82AB98E4  beq  -> return       ; clear means "not for me"
+        //
+        // Nothing ever wrote that register, so it read 0 and the callback
+        // returned immediately every single time — which is why ev5 and ev6
+        // have never been signalled in any run. Set bit 0 to say a vblank is
+        // pending; the game's own handler clears what it needs.
+        wos::StoreU32(base, kGpuVblankStatusReg,
+            wos::LoadU32(base, kGpuVblankStatusReg) | 1u);
 
         fn(ctx, base);
 
