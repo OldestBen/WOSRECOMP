@@ -1421,6 +1421,58 @@ So `--field` now takes `--context N` and prints the N instructions that
 produced the stored register. Twenty candidate sites become one dump that
 answers which of them touches bit 1, with no inference in between.
 
+## The wait-exit bit is an abort flag, and the present bit has no setter
+
+2026-07-28. `--field --context` over both gate bytes, 35 stores with the
+instructions that computed each value. Two results, read directly off the
+listing.
+
+**[device+0x2ABD] bit 1 has exactly two setters.**
+
+    82ABABAC  bl   0x82aba260
+    82ABABB0  lbz  r11,10941(r31)
+    82ABABB4  ori  r11,r11,2         ; sub_82ABAAD8+0xE0
+    82ABABB8  stb  r11,10941(r31)
+
+    82ACB0BC  ori  r10,r10,3         ; sub_82ACB050+0x74 — bits 0 and 1
+    82ACB0C4  stb  r10,10941(r31)
+
+sub_82ACB050 is what the wait predicate calls on timeout (82AC0CC0
+`bl 0x82acb050`). So bit 1 is an **abort** flag: set when the GPU is declared
+hung, to break the wait out. It is the failure path, and it can never fire in
+our runs because the fence advances 64 times a second and the 5000-tick
+deadline is unreachable.
+
+**This corrects my reading of the wait.** sub_82AC0C10 returning 0 on that bit
+is not "the frame is done", it is "give up". The normal exit is not in the
+predicate at all, which means the loop condition lives in the caller —
+sub_82ABA260, frame #1 on the main thread's stack, never dumped.
+
+The other setter is downstream, not upstream: sub_82ABAAD8 sets the bit
+*after* calling sub_82ABA260. (sub_82ABAAD8 is the command-buffer flush —
+every `bl 0x82abaad8` in the dumped code is guarded by
+`[r31+0x30] > [r31+0x38]`, cursor past limit.) Caveat: r10's load at 82ACB0BC
+falls outside the six-instruction window, so what is recorded here is the `ori`
+itself, not the provenance of the value.
+
+**[device+0x2ABE] bit 1 has no setter at all.** Fifteen stores at that
+displacement; the values are 0x04 (82AB9B78, 82ACD8DC), 0x10 (82AC51DC,
+82AD1348), 0x40 (82ACCC78), and `rlwimi` inserts into bits 0 (82AC287C), 3
+(82ACC9E0), 5 (82AB9080) and 7 (82ACC658). Clears cover bits 3, 4, 5, 6 and 7.
+Not one `ori ...,2` anywhere in the image.
+
+Two possibilities remain, and they are distinguishable rather than a matter of
+opinion: a wider store overlapping the byte — a `stw` or `sth` at displacement
+10940 covers 0x2ABC..0x2ABF — or the field being reached through a form the
+scan does not cover (`stbx`, or a base register plus computed offset).
+
+**Dead lead, recorded.** sub_82AB99E0 was flagged because it stores to
+0x2ABD with no .pdata function and sits near the graphics interrupt callback.
+It is `ori r9,r9,32` — bit 5 — and the function is a five-instruction leaf
+that repoints the command-buffer cursor, base and limit at [ctx+0x4158]+0x12C0.
+Proximity was not evidence. The listing now shows the value, which is what
+made this checkable in one dump rather than by argument.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
