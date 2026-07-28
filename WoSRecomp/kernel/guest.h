@@ -77,6 +77,11 @@ uint32_t CreateThreadPcr(uint8_t* base);
 uint32_t GuestAlloc(uint8_t* base, uint32_t requestedBase, uint32_t size, uint32_t alignment);
 bool GuestCommit(uint8_t* base, uint32_t addr, uint32_t size);
 
+// End of the physical allocation containing `addr`, or 0 if it is not inside
+// one. Implemented in kernel/system.cpp. Lets host code bound a read against
+// the block it was actually given rather than against the whole alias window.
+uint32_t PhysicalBlockEnd(uint32_t addr);
+
 // Watch the D3D device fields that gate the frame loop. Implemented in
 // kernel/d3d_probe.cpp — see the comment there for which fields and why.
 // The probe samples at 200 us so a flag set and cleared within one frame is

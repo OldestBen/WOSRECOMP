@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdio>
 #include <mutex>
+#include <vector>
 #include <thread>
 
 namespace
@@ -43,6 +44,18 @@ constexpr uint32_t kPhysicalEnd  = 0xC0000000u;
 std::mutex g_physMutex;
 uint32_t g_physNext = kPhysicalBase;
 uint64_t g_physAllocated = 0;
+
+// Every physical block handed out, so host code can ask how far it may safely
+// read from a guest pointer it was given.
+//
+// This exists because of the ring buffer. Its size argument has an encoding we
+// have not confirmed, and the recovery for "the write pointer went past our
+// modelled capacity" is to grow the capacity — which, unbounded, walks the
+// command processor out of the ring and into whatever was allocated next.
+// Trading a visible hang for silent memory corruption is the wrong trade, and
+// the allocation edge is a bound we actually know.
+struct PhysBlock { uint32_t begin; uint32_t end; };
+std::vector<PhysBlock> g_physBlocks;
 
 // The 360's timebase runs at 50 MHz. Games divide by this, so returning the
 // stub's zero risks a divide-by-zero rather than merely a wrong timestamp.
@@ -112,6 +125,7 @@ PPC_FUNC(__imp__MmAllocatePhysicalMemoryEx)
 
     g_physNext = uint32_t(end);
     g_physAllocated += size;
+    g_physBlocks.push_back({ addr, uint32_t(end) });
 
     printf("[phys] alloc guest 0x%08X, 0x%X bytes (align 0x%X, flags 0x%X)\n",
         addr, size, alignment, ctx.r3.u32);
@@ -294,3 +308,19 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
     ctx.r3.u64 = wos::kStatusSuccess;
 }
 #endif
+
+namespace wos
+{
+
+// End of the physical block containing `addr`, or 0 if it is not in one.
+// See the comment on g_physBlocks for why this is here.
+uint32_t PhysicalBlockEnd(uint32_t addr)
+{
+    std::lock_guard<std::mutex> lock(g_physMutex);
+    for (const auto& b : g_physBlocks)
+        if (addr >= b.begin && addr < b.end)
+            return b.end;
+    return 0;
+}
+
+} // namespace wos

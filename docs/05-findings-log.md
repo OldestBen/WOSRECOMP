@@ -1727,6 +1727,29 @@ of the two. The wrap is what keeps this correct, so if a run ever passes 0x8000
 without wrapping, the capacity needs a hard ceiling at the allocation edge
 rather than another doubling.
 
+## A ceiling for the ring, at the allocation edge
+
+2026-07-28. The adaptive capacity needed a bound, and the bound needed to come
+from something we actually know rather than another guess.
+
+Physical allocations were a bump allocator with no record of what it handed
+out, so `MmAllocatePhysicalMemoryEx` now keeps the blocks and
+`wos::PhysicalBlockEnd(addr)` answers "how far can I read from this pointer".
+The ring's capacity is clamped to the end of the block it was allocated from.
+
+Why it matters: growing without a ceiling turns "the write pointer went past
+our modelled capacity" into the command processor walking out of the ring and
+interpreting whatever was allocated next as PM4 packets. That is strictly
+worse than the hang it replaced — a hang says where it stopped, corruption
+does not. The ring sits at 0xA00914E0 inside the 0xA0090000+0x30000 block, so
+the real ceiling is 0xBAC8 dwords.
+
+Reaching that clamp would mean the size encoding is wrong in kind rather than
+merely underestimated, so it reports once and says so instead of continuing
+quietly. The span check after the clamp is not redundant: with a ceiling in
+place the write pointer can still exceed the capacity, and at that point
+refusing the read is correct.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

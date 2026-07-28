@@ -376,13 +376,42 @@ void ConsumeRing(uint8_t* base, uint32_t wptr)
         while (grown < wptr && grown < (1u << 30))
             grown <<= 1;
 
-        printf("[gpu] write pointer 0x%X exceeds modelled ring capacity 0x%X — "
-               "the size argument encoding is wrong. Growing to 0x%X and "
-               "continuing; refusing to consume is what hangs the GPU.\n",
-            wptr, s_capacity, grown);
+        // Growing without a ceiling swaps a visible hang for silent corruption:
+        // the walk would leave the ring and start interpreting whatever was
+        // allocated after it as PM4 packets. The physical block the ring was
+        // allocated from is a bound we actually know, so use it — reaching it
+        // means the encoding is not merely underestimated but wrong in kind,
+        // and that is worth stopping and saying rather than papering over.
+        const uint32_t blockEnd = wos::PhysicalBlockEnd(ring);
+        const uint32_t maxDwords = (blockEnd > ring) ? (blockEnd - ring) / 4 : 0;
+
+        if (maxDwords != 0 && grown > maxDwords)
+        {
+            static bool s_reported = false;
+            if (!s_reported)
+            {
+                s_reported = true;
+                printf("[gpu] write pointer 0x%X would need a capacity of 0x%X, but the "
+                       "ring's own allocation ends 0x%X dword(s) in. Clamping there — "
+                       "past this we would be reading someone else's memory as "
+                       "commands.\n", wptr, grown, maxDwords);
+            }
+            grown = maxDwords;
+        }
+
+        if (grown > s_capacity)
+            printf("[gpu] write pointer 0x%X exceeds modelled ring capacity 0x%X — "
+                   "the size argument encoding is wrong. Growing to 0x%X and "
+                   "continuing; refusing to consume is what hangs the GPU.\n",
+                wptr, s_capacity, grown);
         s_capacity = grown;
     }
     const uint32_t capacity = s_capacity;
+
+    // With the clamp in place a write pointer can still exceed the capacity, so
+    // the span has to be bounded too rather than trusted.
+    if (wptr > capacity)
+        return;
 
     // Report the wrap when it happens: the highest write pointer seen before
     // the wrap is the ring's true size in dwords.
