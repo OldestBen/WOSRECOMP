@@ -2027,6 +2027,46 @@ located every touch of it, `--disasm` identified the signaller, `--xrefs`
 bounded its callers. Each tool answered exactly the question the previous one
 raised. Worth recording because most of this session was the opposite.
 
+## The dropped completion APC — the deadlock, end to end
+
+2026-07-28, run 20260728-183603. One line settles it:
+
+    [file] opened "D:\packs\game.XEPACK" -> .../packs/game.XEPACK
+    [file] read carried a completion APC: routine 0x82B16659
+           context 0x829688C0 — WE DROP THIS
+    [file] read 524288 of 0x80000 bytes from "D:\packs\game.XEPACK"
+
+Exactly one read in the whole run carries an APC, and it is the archive read —
+the read after which all asset loading stops. Every other read is synchronous
+with no completion routine.
+
+The chain, with every link measured rather than inferred:
+
+1. The game issues an async read of game.XEPACK with a completion APC.
+2. We perform the read, fill the IO status block, and discard the APC.
+3. The request object therefore stays in state 1 instead of being marked 3.
+4. Guest 0x82965534 never runs, so the event at 0x82F719DC is never signalled.
+5. Threads 4101 (sub_829677D0) and 4104 (sub_82A7CD00) wait on it forever.
+
+`--xrefs 0x82965488` gives four callers — 82965D90, 829661FC, 82966D60,
+82966F0C — none of which is on any stack we have ever dumped, which is
+consistent with the completion path simply never being entered.
+
+**Implementation, and what is assumed in it.** The read is synchronous here, so
+by the time the APC would be delivered the transfer is complete and the status
+block is filled — exactly the state a completion routine expects. Running it
+inline on the calling thread is closer to correct than deferring it; the real
+kernel would run it at APC level on this same thread shortly after return.
+
+The one guess is the address. It arrives **odd** (0x82B16659), and PowerPC
+instructions are 4-byte aligned, so the low bits are a flag rather than part of
+the address. Masking them gives 0x82B16658, which lands in the same 0x82B16xxx
+OS-wrapper module as the create (0x82B16368), set (0x82B16C48) and wait
+(0x82B16CC8) functions — consistent, but consistency is not proof. So the call
+is refused unless the masked address resolves to a real recompiled function,
+and says so. A wrong reading of the encoding reports itself rather than
+jumping into nothing.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

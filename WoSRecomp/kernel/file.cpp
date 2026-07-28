@@ -457,31 +457,61 @@ PPC_FUNC(__imp__NtReadFile)
     if (eventHandle != 0)
         wos::SignalEventIfAny(eventHandle);
 
-    // The completion APC is dropped, and this says so.
+    // Deliver the completion APC.
     //
-    // An async NtReadFile can carry a PIO_APC_ROUTINE that the kernel runs when
-    // the transfer finishes. We ignore it. That is a candidate explanation for
-    // the Game Master's deadlock: the completion routine at guest 0x82965488
-    // marks a request object done and signals the very event it is blocked on,
-    // and if an APC is how that routine gets called, dropping the APC would
-    // leave every request stuck in state 1 forever.
+    // Measured, not assumed: exactly one read in the run carries one — the
+    // async read of game.XEPACK, the read after which all asset loading stops.
     //
-    // Logged rather than implemented, because whether the game passes one at
-    // all is a question with a yes/no answer and no reason to guess it. If this
-    // line never appears, APCs are not the mechanism and the completion is
-    // driven from somewhere else.
+    //     [file] read carried a completion APC: routine 0x82B16659
+    //            context 0x829688C0 — WE DROP THIS
+    //
+    // Dropping it leaves the game's request object in state 1 forever, so the
+    // completion routine at guest 0x82965488 never marks it 3, never signals
+    // the event, and the two loader threads wait on it for the whole run.
+    //
+    // Ours is a synchronous read: by the time we are here the transfer is
+    // done and the status block is filled, which is exactly the state a real
+    // completion APC expects. Running it inline on the calling thread is
+    // therefore closer to correct than deferring it — the true kernel would
+    // run it at APC level on this same thread shortly after return.
+    //
+    // The routine address arrives ODD (0x82B16659). PowerPC instructions are
+    // 4-byte aligned, so the low bits are a flag, not part of the address.
+    // Masking them is a reading of the encoding, not a fact, so the call is
+    // refused unless the masked address resolves to a real recompiled
+    // function — a wrong guess then reports itself instead of jumping into
+    // nothing.
     if (apcRoutine != 0)
     {
+        const uint32_t target = apcRoutine & ~3u;
+        PPCFunc* routine = PPC_LOOKUP_FUNC(base, target);
+
         static unsigned s_logged = 0;
-        if (s_logged < 8)
-        {
+        const bool report = (s_logged < 4);
+        if (report)
             ++s_logged;
-            printf("[file] read carried a completion APC: routine 0x%08X context "
-                   "0x%08X — WE DROP THIS\n", apcRoutine, apcContext);
-            if (s_logged == 8)
-                printf("[file] (further APC notices suppressed)\n");
+
+        if (routine == nullptr)
+        {
+            printf("[file] completion APC 0x%08X (masked 0x%08X) is not a known "
+                   "function — not calling it\n", apcRoutine, target);
+        }
+        else
+        {
+            if (report)
+                printf("[file] delivering completion APC 0x%08X -> 0x%08X, "
+                       "context 0x%08X\n", apcRoutine, target, apcContext);
+
+            // VOID ApcRoutine(PVOID ApcContext, PIO_STATUS_BLOCK, ULONG Reserved)
+            const PPCContext saved = ctx;
+            ctx.r3.u64 = apcContext;
+            ctx.r4.u64 = ioStatusBlock;
+            ctx.r5.u64 = 0;
+            routine(ctx, base);
+            ctx = saved;
         }
     }
+
 
     printf("[file] read %zu of 0x%X bytes from \"%s\" into guest 0x%08X\n",
         read, length, file->guestPath.c_str(), buffer);
