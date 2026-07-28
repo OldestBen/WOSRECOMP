@@ -964,6 +964,61 @@ a stub that returns success to a wait is worse than one that returns an error,
 and a bounds check that returns silently is worse than one that crashes. Both
 produce a system that looks healthy in every log line while doing nothing.
 
+## The graphics interrupt callback (guest 0x82AB9840)
+
+Read 2026-07-28. Two findings, one of them a correction to earlier work in
+this same log.
+
+**It takes two arguments, not three.** The prologue is unambiguous:
+
+    82AB984C  mr r31,r4         ; the context
+    82AB9850  cmplwi cr6,r3,1   ; the source
+
+So the signature is `(source, context)` with the context in r4. An earlier
+change in this project altered it from two arguments to three on the theory
+that the middle slot was a CPU number, which put **zero** in r4 — so every
+access through r31 inside the callback read the zero page and the vblank
+handler ran with a null device. That theory was never checked against the
+code, and it silently disabled the callback for several runs.
+
+**The vblank path is gated on a GPU register:**
+
+    82AB98D8  lis  r11,32712       ; 0x7FC80000
+    82AB98DC  lwz  r11,25924(r11)  ; register at 0x7FC86544
+    82AB98E0  clrlwi. r11,r11,31   ; bit 0
+    82AB98E4  beq  -> return       ; clear: not ours, do nothing
+    82AB98EC  bl   0x82AC46C8      ; otherwise the real handler
+
+Nothing wrote that register, so it read zero and the callback returned
+immediately on every one of the 600+ vblanks per run. The register index is
+arbitrary — there was no route to it except reading the function.
+
+Source 1 is a different path entirely: it walks a table at [ctx+0x2A94],
+traps if it finds the sentinel 0x0BADF00D, optionally calls through a
+function pointer at [that+0x14], then clears a per-CPU bit under a spinlock
+using `1 << [r13+0x10C]`. That is another consumer of the r13 block.
+
+## The frame-present path (guest 0x82AC4E48)
+
+Reading onward from the vblank handler found where frames are actually
+submitted — and an unimplemented import sitting in the middle of it:
+
+    82AC5030  bl __imp__VdGetSystemCommandBuffer   ; r3 = &sp[208], r4 = &sp[116]
+    82AC5034  lwz r11,21532(r31)                   ; if [ctx+0x541C] != 0 ...
+    82AC5040  lwz r11,116(r1)                      ;   ... use the r4 out-value
+    82AC5048  stw r11,8(r10)                       ;   store into [ctx+0x2A90]+8
+    ...
+    82AC5094  bl __imp__VdSwap
+
+`VdGetSystemCommandBuffer` is not implemented, so it is a generated stub that
+writes nothing to either out-parameter. The caller then reads sp[116],
+sp[208], sp[212] and sp[216] — all uninitialised stack. This is the same
+shape as the NtQueryInformationFile bug recorded earlier in this log: an
+out-parameter stub that reports success and fills in nothing.
+
+`VdSwap` is reached from here, which is the call that has never fired in any
+run so far.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
@@ -975,6 +1030,9 @@ produce a system that looks healthy in every log line while doing nothing.
 - **Archive loading stops after one read.** `game.XEPACK` is opened and the
   first 0x80000 bytes are read, then nothing further.
 - **`VdSwap` has still never been called**, so no frame has been presented.
+  Its call site is guest 0x82AC5094, immediately after
+  `VdGetSystemCommandBuffer` — which is an unimplemented out-parameter stub.
+  That is the next thing to implement.
 - **Diagnostic output interleaves.** The all-thread stack dump and the blocked
   -wait reporter print from different threads without a shared lock, so their
   lines shred each other. Some frames also come back as `(no symbol)` mid-walk.
