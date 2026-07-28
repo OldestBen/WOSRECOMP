@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 namespace wos
 {
@@ -75,6 +76,17 @@ uint32_t CreateThreadPcr(uint8_t* base);
 // Implemented in kernel/memory.cpp.
 uint32_t GuestAlloc(uint8_t* base, uint32_t requestedBase, uint32_t size, uint32_t alignment);
 bool GuestCommit(uint8_t* base, uint32_t addr, uint32_t size);
+
+// Serialises diagnostic output.
+//
+// The all-thread stack dumper and the blocked-wait reporter run on different
+// threads and both print multi-line blocks. Without a shared lock their lines
+// shred each other — a real run produced a stack dump with three threads'
+// frames interleaved and renumbered, which is worse than no dump at all.
+//
+// Recursive because the wait reporter prints a header and then calls
+// PrintGuestStack, which takes the same lock.
+std::recursive_mutex& DiagnosticLock();
 
 // Print the current guest call stack and terminate. Implemented in main.cpp,
 // declared here so kernel code can end a run without unwinding through

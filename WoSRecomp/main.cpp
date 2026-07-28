@@ -572,8 +572,17 @@ void RegisterThreadForBacktrace(const char* label)
 #endif
 }
 
+std::recursive_mutex& DiagnosticLock()
+{
+    // Function-local so it is constructed on first use: guest threads start
+    // early and a namespace-scope mutex would race static initialisation.
+    static std::recursive_mutex lock;
+    return lock;
+}
+
 void DumpAllThreadStacks(unsigned frames)
 {
+    std::lock_guard<std::recursive_mutex> diag(DiagnosticLock());
 #ifdef _WIN32
     RestoreHostFpState();
     DumpAllGuestThreadStacks(frames);
@@ -584,6 +593,7 @@ void DumpAllThreadStacks(unsigned frames)
 
 void PrintGuestStack(unsigned frames)
 {
+    std::lock_guard<std::recursive_mutex> diag(DiagnosticLock());
 #ifdef _WIN32
     PrintGuestBacktrace(frames);
 #else

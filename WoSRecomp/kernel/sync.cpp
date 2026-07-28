@@ -483,10 +483,13 @@ bool WaitOnObject(uint32_t handleOrPtr, int64_t timeoutMs, const char* who)
             // not *who*. Each guest thread runs on its own host stack, so a
             // backtrace taken here names the recompiled functions that led
             // into this wait — which is the question that actually matters.
-            printf("[sync] %s: still waiting on event 0x%08X after %llds. "
-                   "Blocked in:\n",
-                who, handleOrPtr, (long long)(kLongWaitWarningMs / 1000));
-            wos::PrintGuestStack(14);
+            {
+                std::lock_guard<std::recursive_mutex> diag(wos::DiagnosticLock());
+                printf("[sync] %s: still waiting on event 0x%08X after %llds. "
+                       "Blocked in:\n",
+                    who, handleOrPtr, (long long)(kLongWaitWarningMs / 1000));
+                wos::PrintGuestStack(14);
+            }
 
             return ev->Wait(-1);
         }
