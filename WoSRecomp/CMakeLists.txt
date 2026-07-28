@@ -43,6 +43,7 @@ set(WOS_SOURCES
     # generated stub — otherwise the two collide at link time.
     kernel/panic.cpp
     kernel/memory.cpp
+    kernel/pcr.cpp
     kernel/system.cpp
     kernel/object.cpp
     kernel/sync.cpp

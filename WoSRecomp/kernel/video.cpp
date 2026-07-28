@@ -179,6 +179,15 @@ void VblankThread(uint8_t* base)
 
         ctx.r1.u64 = s_interruptStack + 0x20000 - 0x100;
 
+        // The callback is guest code, so it needs r13 like any other guest
+        // thread. Allocated once and reused: this is logically one thread
+        // servicing every interrupt, and allocating per firing would leak a
+        // block 60 times a second.
+        static uint32_t s_interruptPcr = 0;
+        if (s_interruptPcr == 0)
+            s_interruptPcr = wos::CreateThreadPcr(base);
+        ctx.r13.u64 = s_interruptPcr;
+
         // THREE arguments, not two: (source, cpu, userdata).
         //
         // This was passing userdata in r4 — the *cpu* slot — leaving r5

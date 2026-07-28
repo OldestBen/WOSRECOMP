@@ -65,6 +65,12 @@ constexpr uint32_t kStatusInvalidHandle     = 0xC0000008u;
 constexpr uint32_t kStatusNoSuchFile        = 0xC000000Fu;
 constexpr uint32_t kStatusObjectPathNotFound = 0xC000003Au;
 
+// Allocate the per-thread block r13 points at, and start the tick thread that
+// keeps its clock field advancing. Returns the guest KPCR address to load into
+// r13, or 0 on failure. Implemented in kernel/pcr.cpp — see the comment there
+// for why guest code cannot run correctly without this.
+uint32_t CreateThreadPcr(uint8_t* base);
+
 // Reserve-and-commit a guest range. Returns the guest base, or 0 on failure.
 // Implemented in kernel/memory.cpp.
 uint32_t GuestAlloc(uint8_t* base, uint32_t requestedBase, uint32_t size, uint32_t alignment);

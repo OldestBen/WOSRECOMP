@@ -21,6 +21,8 @@
 //
 // See docs/03-runtime-architecture.md.
 
+#include "guest.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -787,6 +789,12 @@ int main(int argc, char** argv)
 
     PPCContext ctx{};
     ctx.r1.u64 = kStackTop;
+
+    // r13 is the per-thread block pointer, not a scratch register — see
+    // kernel/pcr.cpp. Leaving it 0 makes every load through it read the zero
+    // page, which is what wedged the graphics layer in a wait that could
+    // never time out.
+    ctx.r13.u64 = wos::CreateThreadPcr(base);
 
     // Seed the FP control word from the host's actual MXCSR.
     //

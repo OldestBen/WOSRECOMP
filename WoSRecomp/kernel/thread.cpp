@@ -152,6 +152,11 @@ void GuestThreadMain(uint8_t* base, std::shared_ptr<wos::ThreadObject> self)
     ctx.r1.u64 = self->stackBase + self->stackSize - 0x100;   // leave a little headroom
     ctx.r3.u64 = self->startContext;
 
+    // Every guest thread needs its own block through r13 — the fields the game
+    // reads there (a clock, a thread identity) are per-thread by definition,
+    // so sharing one would be as wrong as leaving it null. See kernel/pcr.cpp.
+    ctx.r13.u64 = wos::CreateThreadPcr(base);
+
     printf("[thread] %u starting at guest 0x%08X (stack 0x%08X + 0x%X)\n",
         self->threadId, self->entryPoint, self->stackBase, self->stackSize);
 
