@@ -1171,6 +1171,71 @@ covering the start address, and the footer says which of the two rules ended
 it, so a dump truncated at an unwind-record split is visible as such rather
 than passing for a complete function.
 
+## The census pays off, and corrects a method I had been trusting
+
+2026-07-28, run 20260728-032051. First run with the wait call-site census and
+the guest tripwires.
+
+**Two distinct wait sites in sub_82ACECF0, not one.** Thread 4102 (context
+0x4083FD5C) passes through 0x82ACED80 exactly once and then settles into a
+loop on `bl@0x82ACEE14` — 30 ms timeout, 794 calls, 794 timeouts, about 33 Hz,
+which is the 30 ms cycle exactly. Thread 4103 (context 0x4083FDAC) is parked at
+0x82ACED80 with a NULL timeout on 0x4083FDCC and has never returned; its single
+recorded "timeout" is our own five-second warning probe before it re-enters
+`Wait(-1)`. So the loop is alive on one thread and permanently blocked on the
+other, and the earlier reading of a single wait at 0x82ACED80 was wrong.
+
+**Host stack offsets are not reliable attribution — correcting an earlier
+method, not just an earlier fact.** Both graphics threads report
+`__imp__sub_82ACECF0 +0x4CA`, and the census proves they are at different guest
+instructions. clang tail-merged two identical `KeWaitForSingleObject` call
+sequences into one host call site, so dbghelp cannot tell them apart. Every
+`sub_XXXXXXXX +0xNNN` offset quoted earlier in this log is suspect as a
+*position* claim; the function identity is still sound. `ctx.lr` is the only
+trustworthy call-site attribution we have.
+
+**sub_82AC4E48 is never entered.** The tripwire is live — the link resolved
+`__imp__sub_82AC4E48`, and the `sub_82ACECF0` tripwire printed both thread
+entries — and `[trace] present sub_82AC4E48` appears zero times in the run.
+794 timeouts at the site whose result feeds `82ACEE34 cmplwi cr6,r3,258` do
+not produce a single call. So either there is a guard between the branch
+target 0x82ACEDA4 and the call at 0x82ACEDD8, or the branch is not the one I
+read it to be. That region has never been disassembled.
+
+**The main thread is not blocked. It is spinning in guest code.**
+
+    #0   __imp__sub_82AC0C10 +0x79
+    #1   __imp__sub_82ABA260 +0x2D5
+    #2   __imp__sub_82ABAD58 +0x127
+    #3   __imp__sub_829254C8 +0xC1
+    #4   __imp__sub_826B9EC0 +0x5B
+    ...  __imp___xstart, main
+
+This is the first time the main thread has been seen doing anything specific.
+It calls no imports at all, which is precisely why it has been invisible for
+the whole project — the import trace and the heartbeat are both blind to it,
+and only the watchdog's all-thread dump can see it. The addresses are in the
+same 0x82AB/0x82AC band as the rest of the D3D layer.
+
+**The GPU fence stopped at 0x0D while the ring kept flowing.** The last
+`op=0x58` write puts 0x0000000D at 0xA0060200; no fence packet appears after
+that for the remaining ~25 seconds. Meanwhile `CP_RB_WPTR` climbs steadily by
+about 0x300 dwords per poll and the read pointer tracks it, trailing by exactly
+six dwords every time. A main thread spinning on a fence that stopped at 13 is
+a coherent explanation for both, and a better candidate for the real blocker
+than the graphics threads are.
+
+The constant six-dword lag is worth its own look later: it is too regular to be
+noise, and it suggests the consumer stops just short of a trailing packet
+rather than at an arbitrary point.
+
+**Incidental.** `KeDelayExecutionThread` was called 28,068,783 times in the
+first five seconds and 3,969,995 in the next, then vanished from the report
+entirely — a transient during archive loading, not a steady-state spin.
+Handle numbering shifted again between runs (0x00010050/0x00010024 last run,
+0x00010058/0x0001002C this run), confirming handles are as unstable as the
+ev-numbers and must never be used as identifiers across runs.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
