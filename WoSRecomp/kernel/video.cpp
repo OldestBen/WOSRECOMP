@@ -326,9 +326,25 @@ void ConsumeRing(uint8_t* base, uint32_t wptr)
     if (ring == 0 || size == 0)
         return;
 
-    const uint32_t capacity = size / 4;
+    // g_ringSize is a dword count. This used to divide it by four, treating the
+    // size as bytes, which put the capacity at 0x1000 — and the game drove the
+    // write pointer to 0x1003. The guard below then returned silently, so
+    // consumption stopped dead while the read pointer kept being published as
+    // caught up. That is why the fence froze at exactly 0x54f in two
+    // consecutive runs regardless of how often the ring was polled.
+    const uint32_t capacity = size;
     if (wptr > capacity)
+    {
+        // Never fail silently here again.
+        static bool s_warned = false;
+        if (!s_warned)
+        {
+            s_warned = true;
+            printf("[gpu] write pointer 0x%X is past the ring capacity 0x%X — "
+                   "not consuming. The ring size is being misread.\n", wptr, capacity);
+        }
         return;
+    }
     if (wptr == s_consumed)
         return;
 
@@ -382,7 +398,7 @@ void DumpRingOnce(uint8_t* base, uint32_t wptr)
 
     // wptr is a dword index into the ring, not a byte offset — it tracked the
     // packet count exactly (0x1F, 0x25, 0x2B: six dwords per frame).
-    const uint32_t words = std::min<uint32_t>(wptr, size / 4);
+    const uint32_t words = std::min<uint32_t>(wptr, size);
 
     printf("[video] ring contents, %u dword(s) at virtual 0x%08X:\n", words, ring);
     for (uint32_t i = 0; i < words; i += 8)
@@ -621,14 +637,18 @@ PPC_FUNC(__imp__VdInitializeRingBuffer)
     WOS_IMPORT_STUB("VdInitializeRingBuffer");
     const uint32_t physical = ctx.r3.u32;
     const uint32_t virt = (physical != 0) ? PhysicalToVirtual(physical) : 0;
-    const uint32_t size = (ctx.r4.u32 < 32) ? (1u << ctx.r4.u32) : 0;
+    // The size argument is a log2 DWORD count, not bytes. Reading it as bytes
+    // put the capacity at a quarter of its real value, and the game drove the
+    // write pointer past it — proof enough, since a write pointer cannot
+    // exceed the buffer it indexes.
+    const uint32_t sizeDwords = (ctx.r4.u32 < 32) ? (1u << ctx.r4.u32) : 0;
 
     g_ringPhysical = physical;
     g_ringVirtual = virt;
-    g_ringSize = size;
+    g_ringSize = sizeDwords;
 
-    printf("[video] ring buffer: physical 0x%08X -> virtual 0x%08X, size 2^%u = 0x%X bytes\n",
-        physical, virt, ctx.r4.u32, size);
+    printf("[video] ring buffer: physical 0x%08X -> virtual 0x%08X, size 2^%u = 0x%X dword(s)\n",
+        physical, virt, ctx.r4.u32, sizeDwords);
     ctx.r3.u64 = 0;
 }
 #endif
