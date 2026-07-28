@@ -28,70 +28,29 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **THE GAME BOOTS AND RUNS.** 53 imports, GPU initialised, eight
-  guest threads, render loop turning at 60 Hz. It does not draw (there is no
-  renderer) and has not yet progressed to loading assets. The heartbeat
-  found it busy-spinning at 5 million loop iterations a second on stubbed
-  `KeWaitForSingleObject`/`KeResetEvent`. **Fixed — now 510/sec.** The game
-  is stable but *idle*. The wait statistics found why: `ev0` waited **25,517
-  times, signalled 3 times** (the idle JQ worker pool), and the main thread's
-  `KeWaitForSingleObject` targets an object we never saw created — a
-  **guest-embedded dispatcher object** — now adopted on first touch, which
-  worked: `ev5`/`ev6` were adopted at the two graphics threads' `ctx+0x20`.
-  **Everything is now quiescent: every thread waits, nothing signals.** The
-  blocked waiter is a *spawned* thread, not the main thread (backtrace
-  correction — see log). **The main thread makes no import calls at all and is
-  not blocked on a lock either** — the critical-section watchdog stayed
-  silent, ruling that out. It is executing guest code. A watchdog now suspends
-  and backtraces *every* thread after 15 s of no new imports, which is the
-  only way to observe a thread that calls nothing. **Not yet run.**
-- **Game data:** file opens need `WOS_GAME_ROOT` pointed at the extracted
-  disc, or a `private/game/` directory. Guest paths look like
-  `D:\game_shared.ini`; the resolver strips the device prefix and treats the
-  rest as relative to that root. Confirmed working against a real dump whose
-  top level is `amalga.toc`, `game_shared.ini`, `movies/`, `packs/`,
-  `sound/`.
-- **Import overrides:** implementations live in `WoSRecomp/kernel/*.cpp` and
-  are listed in `kernel/kernel_overrides.h`, which compiles the matching
-  generated stub out. Verified by link test — each import is defined exactly
-  once, by the implementation where one exists and by the stub otherwise.
-  `imports_generated.cpp` must be regenerated for this to work; CMake fails
-  with an explanatory error if it is stale.
-- **Toolchain:** builds clean on Windows (VS 2026, clang-cl 22.1.3, CMake
-  4.3.1) and Linux (Clang 18.1.3, CMake 3.28). Five tools:
-  `XenonAnalyse`, `XenonRecomp`, `XenosRecomp`, plus our `xex_info` and
-  vendored `extract-xiso`.
-- **Game data:** `private/default.xex` in place (14,528,512 bytes, no title
-  update). Base `0x82000000`, entry `0x82B15E38`, `.text` 0x91C9AC
-  (~2.39M instructions).
-- **Config:** complete and verified — 8 register save/restore addresses
-  (cross-validated by block size), 498 switch tables, 106 function boundary
-  overrides.
-- **Recompile:** runs to **100%**. Switch errors cut 2,123 -> 466 (123 -> 33
-  sites). 15 missing PPC opcodes implemented via
-  `patches/XenonRecomp/0001-*.patch`, applied automatically by
-  `build_tools.sh` — **confirmed on the game: zero `Unrecognized
-  instruction` lines**, down from 265.
-- **`WoSRecompLib/ppc/` is not self-cleaning** — or wasn't. XenonRecomp
-  writes `ppc_recomp.0..N.cpp` and never deletes, so a run producing fewer
-  chunks than the previous one left surplus files behind holding the old
-  function boundaries. Static-library builds don't notice; linking an
-  executable does, as `duplicate symbol: sub_XXXXXXXX`. Fixed in the
-  XenonRecomp patch (it now prunes indices at/above the current count).
-  **After pulling this, re-run `tools/build_tools.sh` then
-  `tools/recompile.sh` — `build_ppc.sh` alone will not clear the strays.**
-- **Known defects:** 33 switch sites still emit wrong control flow — a
-  function/walk alignment problem, diagnosed in the findings log, judged
-  diminishing returns for now.
-- **Compiled:** `tools/build_ppc.sh` builds the 200 generated translation
-  units into a **192 MB static library in 27 s** (-j14), **zero compile
-  errors**. The memory cap looks conservative — there is clearly headroom.
-- **Runtime implemented so far:** guest allocator, TLS, critical sections,
-  kernel objects/handles, events, mutants, waits, real host-backed guest
-  threads, file open/size/seek/read, panic paths, `RtlInitAnsiString`,
-  `RtlRaiseException` (thread-name decoding).
-- **Not started:** GPU and shader recompilation (the largest remaining
-  piece), audio, input, save/storage, and ~180 further imports.
+- **Stage:** **THE GAME BOOTS, RUNS, AND DRIVES THE GPU.** 76 imports
+  reached. The graphics layer no longer reports a hang, the ring buffer flows
+  continuously with the read pointer tracking the write pointer, and the GPU
+  fence advances in step with the CPU fence. Nothing is drawn — there is no
+  renderer, and `VdSwap` has still never been called.
+- **Idle, not stuck.** Every thread now blocks on a real wait instead of
+  spinning. The import heartbeat fell from **58,317,635 calls per five
+  seconds to ~11,000** — a factor of about 5,000 — once the last
+  success-returning wait stub was implemented.
+- **Three waits nobody signals**, which is the current blocker: handles
+  `0x00010050` and `0x00010024` via `NtWaitForMultipleObjectsEx` (both
+  through `sub_82B16CC8`, from thread entries `0x82A7CD00` and `0x829677D0`),
+  and the guest-embedded event at `0x4083FDCC` via `KeWaitForSingleObject`
+  from the two graphics threads at `0x82ACECF0`.
+- **Archive loading stops after one read** of 0x80000 bytes from
+  `game.XEPACK`.
+- **The frame-present path is never reached.** `sub_82AC4E48` calls
+  `VdGetSystemCommandBuffer` and then `VdSwap`; implementing the former did
+  not cause either to fire, so the function itself is not being called. Its
+  callers are the thing to find next (`xex_info --xrefs 0x82AC4E48`).
+
+Full evidence for each of these is in
+[`docs/05-findings-log.md`](docs/05-findings-log.md).
 
 ## Next Steps (in order)
 
@@ -956,3 +915,60 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - `.gitignore` set up to exclude `private/`, `*.xex`, `*.xexp`, and generated
   `WoSRecompLib/ppc/*` output — this repo must never contain copyrighted game
   files or the recompiled game's CPU code, only the runtime scaffold/tooling.
+
+## 2026-07-28 — the graphics layer, end to end
+
+Eight bugs, each hidden behind the one before it. Every one found by
+measurement — disassembling the guest, or reading a counter — rather than by
+reasoning about what ought to be true. The two occasions this session where a
+theory was acted on without checking it against the code were the two most
+expensive detours, and both were the same mistake in the same function.
+
+**Runtime fixes, in the order they were needed:**
+
+1. **`r13` was never set.** It is the per-thread block pointer on Xbox 360,
+   not a scratch register. Null meant the GPU watchdog's clock read 0 forever,
+   so its 5000-tick deadline was unreachable and it spun without ever calling
+   its own timeout handler. New: `kernel/pcr.cpp`.
+2. **Video driver addresses are physical.** `VdInitializeRingBuffer` and
+   `VdEnableRingBufferRPtrWriteBack` receive physical addresses; we wrote the
+   read pointer to a virtual address of the same number — an unrelated page,
+   which the harness then committed on first touch, making the error look
+   deliberate.
+3. **Nothing executed the command packets.** The GPU fence rides on PM4
+   opcode 0x58. Two per frame: a progress pointer and a counter.
+4. **The ring size argument is a log2 dword count, not bytes.** Read as
+   bytes, the capacity came out four times too small; once the write pointer
+   passed it, consumption stopped *silently* while the read pointer was still
+   published as caught up.
+5. **`NtWaitForMultipleObjectsEx` was an unimplemented stub** returning
+   success to a wait — 11.7 M calls per five seconds.
+6. **`KeDelayExecutionThread` was unimplemented**, so every `Sleep()` in the
+   game was a no-op: 45 M calls per five seconds.
+7. **The physical window modelled a 256 MiB console.** The real uncached
+   alias is 0xA0000000..0xBFFFFFFF — 512 MiB. A 290 MiB request during
+   archive loading was being refused.
+8. **The graphics interrupt callback takes two arguments, not three**, and
+   its vblank path is gated on GPU register 0x7FC86544 bit 0, which nothing
+   ever set. Correcting an earlier wrong change of ours; see the findings log.
+
+**Tooling added:**
+
+- `xex_info --disasm <addr> [count]` — disassemble guest code, marking branch
+  targets and naming the symbol behind a `bl`. Stops at a real function end.
+- `xex_info --xrefs <addr>` — every branch to, and stored pointer to, an
+  address. Points it at an import thunk and it lists every call site.
+- `kernel/format.cpp` — real printf-family formatting for `DbgPrint`,
+  `_vsnprintf` and `sprintf`. This is what made the game's own D3D hang dump
+  legible, and that dump is what identified the fence.
+- A GPU command-processor thread that consumes the ring, follows indirect
+  buffers, executes register writes and memory-write packets, and reports each
+  new opcode once.
+- A shared diagnostic lock, after a stack dump interleaved three threads'
+  frames into something worse than useless.
+
+**The pattern worth keeping.** A stub that returns success to a *wait*
+inverts the call's timing semantics and turns a block into a busy-spin — that
+one cost five separate runs. A bounds check that returns *silently* is worse
+than one that crashes. Both produce a system that looks healthy in every log
+line while doing nothing at all.
