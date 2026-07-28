@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdio>
 #include <thread>
+#include <algorithm>
 
 namespace
 {
@@ -42,11 +43,45 @@ std::atomic<uint64_t> g_vblankCount{0};
 // wherever the write pointer is — i.e. "the GPU has caught up".
 std::atomic<uint32_t> g_rptrWriteBackPtr{0};
 
+// The ring buffer itself, so its contents can be read rather than guessed at.
+std::atomic<uint32_t> g_ringPhysical{0};
+std::atomic<uint32_t> g_ringVirtual{0};
+std::atomic<uint32_t> g_ringSize{0};
+
 // Xbox 360 GPU register window, and the ring buffer write pointer within it.
 // Confirmed by the game itself: its only write during init landed on
 // 0x7FC80714.
 constexpr uint32_t kGpuRegisterBase = 0x7FC80000;
 constexpr uint32_t kGpuWritePointerReg = kGpuRegisterBase + 0x714;
+constexpr uint32_t kGpuReadPointerReg  = kGpuRegisterBase + 0x710;
+
+// Every address the game hands the video driver is a PHYSICAL address.
+//
+// MmGetPhysicalAddress is `addr & 0x1FFFFFFF` — it strips the alias window and
+// keeps the offset — and the game calls it before VdInitializeRingBuffer and
+// VdEnableRingBufferRPtrWriteBack. So the 0x0006023C we were given is physical,
+// and the memory it refers to is the physical allocation the game made at
+// virtual 0xA006023C.
+//
+// We were storing the read pointer to guest 0x0006023C directly, i.e. to an
+// unrelated page near the bottom of the address space — which the harness then
+// helpfully committed, making the mistake look deliberate. The game read its
+// own virtual alias and saw nothing change, forever.
+//
+// The evidence is in the game's own hang dump, now that it formats properly:
+// it reports Snooped 0xa0060200 and NonSnooped 0xa0030200, both inside
+// physical allocations we handed out at 0xA0030000 and 0xA0060000. Its view of
+// this memory is the 0xA0000000 alias, so that is where writes have to land.
+constexpr uint32_t kPhysicalAlias = 0xA0000000;
+
+uint32_t PhysicalToVirtual(uint32_t physical)
+{
+    // Already an alias address (the game sometimes passes one through
+    // unconverted); leave it alone rather than aliasing it twice.
+    if (physical >= 0x80000000u)
+        return physical;
+    return kPhysicalAlias + physical;
+}
 
 // X_VIDEO_MODE, 0x30 bytes, big-endian throughout.
 void WriteVideoMode(uint8_t* base, uint32_t out)
@@ -127,6 +162,55 @@ void ReportRingProgress(uint8_t* base, uint32_t rptrPtr)
     s_first = false;
 }
 
+// Dump the command packets the game has actually written into the ring.
+//
+// The remaining problem is the GPU fence. The game's hang dump reports:
+//
+//     CPU fence 0x7, GPU fence 0x1        (then 0x9, 0xb, 0xd, 0xf, 0x11 ...)
+//
+// The CPU fence advances by two per frame and the GPU fence never moves off 1.
+// The game submits a command that means "write this value to this address when
+// you get here", and waits for the value to appear. Nothing here executes
+// commands, so it never appears.
+//
+// Making that work means interpreting the ring, and the packet encoding is not
+// something this code has established. So dump the words once and read them,
+// rather than writing a parser from memory and getting a fence protocol subtly
+// wrong — the failure mode of a wrong parser is a game that renders garbage
+// intermittently, which is far harder to diagnose than one that does not
+// render at all.
+//
+// Written as a one-shot: the ring is small and the interesting part is the
+// first submission.
+void DumpRingOnce(uint8_t* base, uint32_t wptr)
+{
+    static bool s_done = false;
+    if (s_done)
+        return;
+
+    const uint32_t ring = g_ringVirtual.load(std::memory_order_relaxed);
+    const uint32_t size = g_ringSize.load(std::memory_order_relaxed);
+    if (ring == 0 || size == 0 || wptr == 0)
+        return;
+
+    s_done = true;
+
+    // wptr is a dword index into the ring, not a byte offset — it tracked the
+    // packet count exactly (0x1F, 0x25, 0x2B: six dwords per frame).
+    const uint32_t words = std::min<uint32_t>(wptr, size / 4);
+
+    printf("[video] ring contents, %u dword(s) at virtual 0x%08X:\n", words, ring);
+    for (uint32_t i = 0; i < words; i += 8)
+    {
+        printf("[video]   +%04X:", i * 4);
+        for (uint32_t j = i; j < i + 8 && j < words; ++j)
+            printf(" %08X", wos::LoadU32(base, ring + j * 4));
+        printf("\n");
+    }
+    printf("[video] (dumped once — this is what has to be interpreted for the\n"
+           "        GPU fence to advance; see the comment in video.cpp)\n");
+}
+
 // Stands in for the display's vertical blank.
 //
 // Source 0 is vblank, 1 is a buffer swap. Firing only vblank is the
@@ -153,11 +237,19 @@ void VblankThread(uint8_t* base)
         //
         // The write pointer lives in the GPU register window. The game wrote
         // to guest 0x7FC80714 once during init, which is CP_RB_WPTR.
+        const uint32_t wptr = wos::LoadU32(base, kGpuWritePointerReg);
         const uint32_t rptrPtr = g_rptrWriteBackPtr.load(std::memory_order_relaxed);
         if (rptrPtr != 0)
-            wos::StoreU32(base, rptrPtr, wos::LoadU32(base, kGpuWritePointerReg));
+            wos::StoreU32(base, rptrPtr, wptr);
+
+        // The game reads CP_RB_RPTR out of the register window too — its hang
+        // dump printed "CP_RB_RPTR: 0x00000000" against a write pointer of
+        // 0x43, which is exactly the picture of a GPU that has consumed
+        // nothing. Keep the register consistent with the write-back.
+        wos::StoreU32(base, kGpuReadPointerReg, wptr);
 
         ReportRingProgress(base, rptrPtr);
+        DumpRingOnce(base, wptr);
 
         const uint32_t callback = g_interruptCallback.load(std::memory_order_relaxed);
         if (callback == 0)
@@ -310,8 +402,11 @@ PPC_FUNC(__imp__VdGetCurrentDisplayInformation)
 PPC_FUNC(__imp__VdInitializeRingBuffer)
 {
     WOS_IMPORT_STUB("VdInitializeRingBuffer");
-    printf("[video] ring buffer at guest 0x%08X, size 2^%u bytes\n",
-        ctx.r3.u32, ctx.r4.u32);
+    g_ringPhysical = ctx.r3.u32;
+    g_ringVirtual = (ctx.r3.u32 != 0) ? PhysicalToVirtual(ctx.r3.u32) : 0;
+    g_ringSize = (ctx.r4.u32 < 32) ? (1u << ctx.r4.u32) : 0;
+    printf("[video] ring buffer: physical 0x%08X -> virtual 0x%08X, size 2^%u = 0x%X bytes\n",
+        g_ringPhysical, g_ringVirtual, ctx.r4.u32, g_ringSize);
     ctx.r3.u64 = 0;
 }
 #endif
@@ -326,10 +421,13 @@ PPC_FUNC(__imp__VdInitializeRingBuffer)
 PPC_FUNC(__imp__VdEnableRingBufferRPtrWriteBack)
 {
     WOS_IMPORT_STUB("VdEnableRingBufferRPtrWriteBack");
-    g_rptrWriteBackPtr = ctx.r3.u32;
-    printf("[video] ring buffer read-pointer writeback at guest 0x%08X\n", ctx.r3.u32);
-    if (ctx.r3.u32 != 0)
-        wos::StoreU32(base, ctx.r3.u32, 0);
+    const uint32_t physical = ctx.r3.u32;
+    const uint32_t virt = (physical != 0) ? PhysicalToVirtual(physical) : 0;
+    g_rptrWriteBackPtr = virt;
+    printf("[video] ring buffer read-pointer writeback: physical 0x%08X -> virtual 0x%08X\n",
+        physical, virt);
+    if (virt != 0)
+        wos::StoreU32(base, virt, 0);
 }
 #endif
 
