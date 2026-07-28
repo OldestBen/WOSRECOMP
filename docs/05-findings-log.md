@@ -1236,6 +1236,87 @@ Handle numbering shifted again between runs (0x00010050/0x00010024 last run,
 0x00010058/0x0001002C this run), confirming handles are as unstable as the
 ev-numbers and must never be used as identifiers across runs.
 
+## The frame loop stops on three bytes in the D3D device
+
+2026-07-28. Both halves of the stall reduce to fields in one guest structure,
+and the structure is reachable from a fixed global, so all of it is directly
+observable.
+
+**The present is gated on a flag nothing sets.** The region between the
+STATUS_TIMEOUT branch target and the present call had never been read. It is:
+
+    82ACEDA4  > lwz     r11,4516(r24)      ; r24 = 0x82000000 -> [0x820011A4]
+    82ACEDA8    lwz     r30,0(r11)         ; r30 = the D3D device
+    82ACEDAC    addi    r29,r30,14944      ; device+0x3A60, a critical section
+    82ACEDB4    bl      __imp__RtlEnterCriticalSection
+    82ACEDB8    lbz     r11,10942(r30)     ; [device+0x2ABE]
+    82ACEDBC    rlwinm. r11,r11,0,30,30    ; test bit 0x02
+    82ACEDC0    beq     0x82aceddc         ; CLEAR -> skip both present calls
+    82ACEDC4    mr      r3,r30
+    82ACEDC8    bl      0x82ac4e40
+    82ACEDD0    addi    r4,r30,14844
+    82ACEDD8    bl      0x82ac4e48         ; the present
+    82ACEDDC  > mr      r3,r29
+    82ACEDE0    bl      __imp__RtlLeaveCriticalSection
+
+The graphics thread reaches 82ACEDA4 about 33 times a second — 794 timeouts in
+the run — and takes the `beq` every single time. So `[device+0x2ABE] & 0x02` is
+the "a frame is ready to present" flag, and nothing in the run sets it. This is
+why the tripwire on sub_82AC4E48 never fired despite the branch being taken
+constantly: the branch is taken, and then the call is skipped.
+
+Note `rlwinm. rA,rS,0,30,30` is mask 0x02 in big-endian bit numbering, not
+0x40000000. The neighbouring byte uses `clrlwi r11,r11,31` (mask 0x01) for a
+different flag, which confirms the encoding rather than leaving it to memory.
+
+**The main thread is a GPU wait predicate.** sub_82AC0C10 returns 1 for "keep
+waiting" and 0 for "done":
+
+    82AC0C24    lwz     r29,0(r31)         ; r31 = wait state, [r31+0] = device
+    82AC0C28  > db16cyc x8, repeated x4    ; a deliberate stall, not a nop
+    82AC0C50    lbz     r11,10941(r29)     ; [device+0x2ABD]
+    82AC0C54    rlwinm. r11,r11,0,30,30    ; test bit 0x02
+    82AC0C58    bne     0x82ac0cd4         ; SET -> return 0, the clean exit
+    82AC0C5C    lwz     r11,10896(r29)     ; [device+0x2A90] -> the polled counter
+    82AC0C60    lwz     r10,256(r13)       ; KPCR -> current thread
+    82AC0C68    lwz     r8,0(r11)          ; the counter's value
+    82AC0C6C    lwz     r30,88(r10)        ; thread+0x58 — the tick r13 provides
+    82AC0C70    cmplw   cr6,r9,r8          ; changed since [r31+8]?
+    82AC0C7C    stw     r30,12(r31)        ;   yes -> reset the deadline
+    82AC0CAC    cmplwi  cr6,r11,5000       ; 5000 ticks with no progress
+    82AC0CC0    bl      0x82acb050         ;   -> the "GPU is hung" handler
+    82AC0CB4  > li      r3,1               ; otherwise keep waiting
+
+This is the same 5000-tick watchdog that produced `ERR[D3D]: The GPU is hung!`
+before r13 was implemented. Two things it settles: `[device+0x2A90]` holds a
+*pointer* to the counter being polled, not the counter itself; and the whole
+loop calls no imports, which is exactly why the main thread has been invisible
+to the import trace and the heartbeat for the entire project. Only the
+all-thread watchdog dump can see it.
+
+**The device is at *(*(0x820011A4)).** `lis r24,-32256` is 0x82000000 and
+`lwz r11,4516(r24)` is [0x820011A4]; the device is what that points to. Both
+sub_82ACECF0 and sub_82AC1690 resolve it the same way, so this is the game's
+single global device slot rather than a local convention.
+
+## A 200 us watch on the device flags
+
+2026-07-28. Added `kernel/d3d_probe.cpp`: a thread that resolves the device
+from the global slot and samples `[device+0x2ABE]`, `[device+0x2ABD]`, and the
+counter behind `[device+0x2A90]`, reporting from the heartbeat.
+
+Two design points worth keeping. It ORs each observed byte into a sticky mask,
+because a flag set and cleared inside one frame is invisible to a five-second
+sample — "never set once in thirty seconds" is only a claim worth making if the
+sampling can actually catch a transient. And it samples at 200 us rather than
+on the heartbeat for the same reason. The fence value is tracked as
+min/max/current so a counter that moves and then stops is distinguishable from
+one that never moved.
+
+What the next run decides: if bit 1 of +0x2ABE is never seen, the frame is
+never marked ready and the question becomes what should set it. If it is seen,
+the graphics thread is missing a window and the fix is on our side.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

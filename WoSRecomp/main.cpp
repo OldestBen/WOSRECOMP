@@ -848,7 +848,11 @@ int main(int argc, char** argv)
     // question that matters: is it doing work, or spinning?
     wos::RegisterThreadForBacktrace("main thread");
 
-    std::thread([]
+    // Started before the guest runs so it is already sampling when the device
+    // is constructed — the flags it watches may only ever be set transiently.
+    wos::StartD3DProbe(base);
+
+    std::thread([base]
     {
         auto previous = wos::SnapshotImportCounts();
         int quietTicks = 0;
@@ -894,6 +898,7 @@ int main(int argc, char** argv)
             }
 
             wos::ReportWaitActivity();
+            wos::ReportD3DProbe(base);
 
             // "Busy" here means *new* imports appearing, not calls happening.
             // A game polling the same three waits forever is not progressing,

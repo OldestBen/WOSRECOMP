@@ -53,6 +53,7 @@ set(WOS_SOURCES
     kernel/video.cpp
     kernel/debug.cpp
     kernel/rtl.cpp
+    kernel/d3d_probe.cpp
     # Overrides *guest* functions rather than imports, to observe that control
     # reached a particular address. See the comment at the top of the file.
     kernel/trace_guest.cpp)

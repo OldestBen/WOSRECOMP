@@ -77,6 +77,13 @@ uint32_t CreateThreadPcr(uint8_t* base);
 uint32_t GuestAlloc(uint8_t* base, uint32_t requestedBase, uint32_t size, uint32_t alignment);
 bool GuestCommit(uint8_t* base, uint32_t addr, uint32_t size);
 
+// Watch the D3D device fields that gate the frame loop. Implemented in
+// kernel/d3d_probe.cpp — see the comment there for which fields and why.
+// The probe samples at 200 us so a flag set and cleared within one frame is
+// still observed; the report is called from the heartbeat.
+void StartD3DProbe(uint8_t* base);
+void ReportD3DProbe(uint8_t* base);
+
 // Serialises diagnostic output.
 //
 // The all-thread stack dumper and the blocked-wait reporter run on different
