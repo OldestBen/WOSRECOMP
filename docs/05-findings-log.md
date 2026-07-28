@@ -1989,6 +1989,44 @@ it is blocked on ev2 and ev4, and it has never been dumped.
 adaptive ring capacity is holding, and no wrap has occurred yet, so the ring
 size encoding is still open.
 
+## Found the signaller — five instructions, guarded by two branches
+
+2026-07-28. `--field 0x19DC` gave three touches of the Game Master's event
+handle in the whole image: created and stored at sub_82967F50+0x114, read by
+the Game Master's wait at 82967888, and read by a fragment at 0x82965534.
+`--disasm` on that fragment:
+
+    82965534  lis r9,-32009
+    82965538  li  r10,3
+    8296553C  stw r10,52(r11)      ; [r11+0x34] = 3 — mark complete
+    82965540  lwz r3,6620(r9)      ; r3 = handle at 0x82F719DC
+    82965544  b   0x82B16C48       ; TAIL CALL to the set wrapper
+
+That is the signaller, and the only one. It writes a status field and signals
+the event the Game Master is blocked on. It is not a function of its own — it
+is the tail of a state machine, reached from exactly two conditional branches:
+
+    829654F8  beq cr6,0x82965534
+    82965504  bgt cr6,0x82965534
+
+`--xrefs` finds no stored pointers to it, so those two branches are the whole
+story. Whatever comparison feeds cr6 just before them is the condition that
+never holds, and that is now a bounded question about a dozen instructions
+rather than a search across an image.
+
+**Also confirmed by construction:** 0x82B16C48 is the set wrapper, and it is
+reached by *tail call* here. That is consistent with 0x82B16C40/0x82B16C48
+being an acquire/release pair eight bytes apart, and with the set wrapper's
+huge signal count being mostly lock releases rather than work notifications —
+the same wrapper serves both roles, which is why the raw NtSetEvent rate said
+nothing useful about whether work was being signalled.
+
+**Method note.** This is the first time the tooling chain has run end to end
+without a wrong turn: the event lifecycle report named the handle, `--field`
+located every touch of it, `--disasm` identified the signaller, `--xrefs`
+bounded its callers. Each tool answered exactly the question the previous one
+raised. Worth recording because most of this session was the opposite.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
