@@ -515,11 +515,15 @@ LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
                 (void*)g_guestBase, (void*)(g_guestBase + g_guestSize));
             printf("  -> host-side bug: the reservation covers the entire 32-bit\n");
             printf("     guest space, so this cannot be a guest access.\n");
+            // Signed offset from the guest base. A near miss just below the
+            // base is a very different bug from a wild pointer, and the raw
+            // addresses alone make that hard to see.
+            const uintptr_t faulting = reinterpret_cast<uintptr_t>(addr);
+            const uintptr_t guestBase = reinterpret_cast<uintptr_t>(g_guestBase);
+            const bool below = faulting < guestBase;
             printf("     Offset from the guest base: %s0x%llX\n",
-                (reinterpret_cast<uintptr_t>(addr) < g_guestBase) ? "-" : "+",
-                (unsigned long long)((reinterpret_cast<uintptr_t>(addr) < g_guestBase)
-                    ? g_guestBase - reinterpret_cast<uintptr_t>(addr)
-                    : reinterpret_cast<uintptr_t>(addr) - g_guestBase));
+                below ? "-" : "+",
+                (unsigned long long)(below ? guestBase - faulting : faulting - guestBase));
         }
     }
 
