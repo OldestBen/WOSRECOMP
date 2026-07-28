@@ -292,12 +292,21 @@ void ExecutePackets(uint8_t* base, uint32_t bufferVirtual, uint32_t dwordCount, 
                 {
                     wos::StoreU32(base, target, value);
 
+                    // The cap needs to announce itself. Without the notice
+                    // below, a log that simply stops mentioning these writes
+                    // reads exactly like a fence that stopped advancing —
+                    // which is precisely the wrong conclusion this log talked
+                    // me into once already. The device probe reports the live
+                    // value, so silence here costs nothing.
                     static unsigned s_logged = 0;
                     if (s_logged < 12)
                     {
                         ++s_logged;
                         printf("[gpu] op=0x%02X write: raw 0x%08X -> virtual 0x%08X = 0x%08X\n",
                             opcode, rawAddr, target, value);
+                        if (s_logged == 12)
+                            printf("[gpu] (further memory-write packets suppressed — "
+                                   "they continue; watch the [d3d] fence value)\n");
                     }
                 }
                 else

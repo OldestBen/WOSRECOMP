@@ -1217,13 +1217,16 @@ the whole project — the import trace and the heartbeat are both blind to it,
 and only the watchdog's all-thread dump can see it. The addresses are in the
 same 0x82AB/0x82AC band as the rest of the D3D layer.
 
-**The GPU fence stopped at 0x0D while the ring kept flowing.** The last
+**The GPU fence stopped at 0x0D while the ring kept flowing.** *(WRONG — see
+the correction in the device-probe entry below. The fence never stopped; the
+`op=0x58` log line is capped at twelve occurrences in video.cpp, so the log
+went quiet while the writes continued. The reasoning below is left in place
+because the mistake is instructive: a diagnostic that stops printing is not
+evidence that the thing it prints about stopped happening.)* The last
 `op=0x58` write puts 0x0000000D at 0xA0060200; no fence packet appears after
 that for the remaining ~25 seconds. Meanwhile `CP_RB_WPTR` climbs steadily by
 about 0x300 dwords per poll and the read pointer tracks it, trailing by exactly
-six dwords every time. A main thread spinning on a fence that stopped at 13 is
-a coherent explanation for both, and a better candidate for the real blocker
-than the graphics threads are.
+six dwords every time.
 
 The constant six-dword lag is worth its own look later: it is too regular to be
 noise, and it suggests the consumer stops just short of a trailing packet
@@ -1316,6 +1319,74 @@ one that never moved.
 What the next run decides: if bit 1 of +0x2ABE is never seen, the frame is
 never marked ready and the question becomes what should set it. If it is seen,
 the graphics thread is missing a window and the fix is on our side.
+
+## The device probe answers it, and corrects me on the fence
+
+2026-07-28, run 20260728-122056.
+
+**The device is 0x4083D080 — the same pointer VdSetGraphicsInterruptCallback
+was given as user data.** The graphics interrupt context and the D3D device
+are one object. That was never stated before and it ties the interrupt path
+and the frame loop to the same structure.
+
+**Both gates are dead, and they are dead differently.**
+
+    +2ABE (present gate)  ever=0x14   bit1 never
+    +2ABD (wait exit)     ever=0x00   bit1 never
+
+`0x14` is bits 2 and 4, so that byte is live — the game writes it, just never
+the bit the present call needs. `+2ABD` is never written at all in a
+thirty-second run, so the main thread's clean exit from sub_82AC0C10 has never
+been available to it.
+
+**CORRECTION: the GPU fence never stopped.** The previous entry concluded it
+froze at 0x0D because the `[gpu] op=0x58 write` lines stopped appearing. They
+stopped because that printf is capped at twelve occurrences in video.cpp. The
+probe reads the counter directly and it is climbing steadily:
+
+    value 0x0000027D -> 0x000004FB -> 0x00000777 -> 0x000009F3
+
+in increments of 2, about 64 per second — the same +2 pattern as the twelve
+logged writes, continuing uninterrupted. The ring, the command processor and
+the fence are all healthy.
+
+This was self-inflicted, and the lesson is worth more than the fact: a
+diagnostic that stops printing is not evidence that the thing it reports
+stopped happening. The cap now announces itself when it engages.
+
+**Which means the main thread will spin forever by design.** sub_82AC0C10
+resets its deadline whenever the polled counter changes, and the counter
+changes 64 times a second, so the 5000-tick timeout is unreachable. It is not
+hung and it is not going to report itself as hung — it is correctly waiting
+for `[device+0x2ABD] & 0x02`, which nothing sets. The stack offsets differ
+between runs (`sub_82AC0C10 +0x79` then `+0x285`), confirming it is live and
+moving rather than parked.
+
+**Supporting reads.** `[device+0x2A88] = 0x40001000`, which is the main
+thread's thread block — the value guest 0x82B13200 returns, stored by
+sub_82AC0F68 (`bl 0x82b13200; stw r3,10888(r31)`). `[device+0x2AFC] = 0`, so
+the second deadline-reset path at 82AC0C94 never runs either.
+
+## --field: finding who touches a struct field
+
+2026-07-28. `--xrefs` answers "who reaches this address" and structurally
+cannot answer "who touches this field", because a field access encodes no
+address at all — only a base register and a 16-bit displacement. That is
+exactly the question left: nothing in the ~1600 instructions dumped by hand
+writes bit 1 of either gate byte.
+
+`xex_info --field <disp> [--stores]` scans every code section for D-form
+loads and stores whose displacement matches, and names the containing function
+from .pdata. The match is exact rather than heuristic — the displacement is
+the low 16 bits and the primary opcode the top 6 — but it cannot know the base
+register's *type*, so hits against unrelated structures with the same offset
+are expected and the output says so. For this game the D3D code clusters in
+0x82AB..0x82AD, which makes the real hits easy to pick out.
+
+Known limitation: DS-form `ld`/`std` (primary 58/62) use the low two bits as
+an opcode extension rather than displacement, and the floating-point forms are
+not covered. Neither matters for a byte-sized flag; both would need handling
+before trusting this for 64-bit fields.
 
 ## Open questions / blockers
 

@@ -970,6 +970,100 @@ static uint32_t backedSize(const Image& image, const Section& s)
     return (available < s.size) ? uint32_t(available) : s.size;
 }
 
+// Every D-form load/store in the image with a given displacement.
+//
+// --xrefs answers "who reaches this address"; it structurally cannot answer
+// "who touches this field", because a struct field access encodes no address
+// at all — just a base register and a 16-bit displacement. That question is
+// what the D3D device stall came down to: the present call is gated on
+// [device+0x2ABE] & 0x02 and the main thread's wait exits on
+// [device+0x2ABD] & 0x02, and neither bit is written anywhere in the ~1600
+// instructions dumped by hand.
+//
+// D-form instructions put the displacement in the low 16 bits and the primary
+// opcode in the top 6, so the scan is exact rather than heuristic. What it
+// cannot know is the base register's *type*: displacement 10942 off some
+// unrelated structure looks identical. Callers get the containing function so
+// they can judge; for this game the D3D code clusters in 0x82AB..0x82AD, which
+// makes the real hits obvious.
+static int fieldRefs(const Image& image, uint32_t displacement, bool storesOnly)
+{
+    struct Form { uint32_t op; const char* name; bool isStore; };
+    // The D-form integer loads and stores. Floating-point and the DS-form
+    // 64-bit pair (ld/std, primary 58/62) use the low two bits as an extension
+    // rather than displacement, so they are handled separately below.
+    static const Form kForms[] = {
+        { 32, "lwz",  false }, { 33, "lwzu", false },
+        { 34, "lbz",  false }, { 35, "lbzu", false },
+        { 36, "stw",  true  }, { 37, "stwu", true  },
+        { 38, "stb",  true  }, { 39, "stbu", true  },
+        { 40, "lhz",  false }, { 41, "lhzu", false },
+        { 42, "lha",  false }, { 43, "lhau", false },
+        { 44, "sth",  true  }, { 45, "sthu", true  },
+    };
+
+    const uint16_t want = static_cast<uint16_t>(displacement);
+    const std::vector<PdataFunc> pdata = readPdata(image);
+
+    auto functionOf = [&](uint32_t a) -> uint32_t {
+        for (const auto& f : pdata)
+            if (a >= f.begin && a < f.end)
+                return f.begin;
+        return 0;
+    };
+
+    printf("Load/store instructions with displacement %u (0x%X)%s:\n\n",
+        displacement, displacement, storesOnly ? ", stores only" : "");
+
+    size_t hits = 0;
+    for (const auto& s : image.sections)
+    {
+        if (!(s.flags & SectionFlags_Code) || s.data == nullptr)
+            continue;
+        const uint32_t limit = backedSize(image, s);
+        for (uint32_t off = 0; off + 4 <= limit; off += 4)
+        {
+            uint32_t raw;
+            std::memcpy(&raw, s.data + off, 4);
+            const uint32_t insn = ByteSwap(raw);
+            const uint32_t op = insn >> 26;
+
+            const Form* form = nullptr;
+            for (const auto& f : kForms)
+                if (f.op == op) { form = &f; break; }
+
+            if (form == nullptr)
+                continue;
+            if (static_cast<uint16_t>(insn & 0xFFFF) != want)
+                continue;
+            if (storesOnly && !form->isStore)
+                continue;
+
+            const uint32_t site = static_cast<uint32_t>(s.base) + off;
+            ppc_insn decoded{};
+            ppc::Disassemble(s.data + off, site, decoded);
+
+            const uint32_t fn = functionOf(site);
+            printf("  %08X  %-6s %-24s", site,
+                form->isStore ? "STORE" : "load",
+                decoded.opcode ? decoded.op_str : "?");
+            if (fn != 0)
+                printf("  in sub_%08X+0x%X", fn, site - fn);
+            printf("\n");
+            ++hits;
+        }
+    }
+
+    if (hits == 0)
+        printf("  (none)\n");
+
+    printf("\n%zu instruction(s).\n", hits);
+    printf("\nNOTE: this matches the displacement only — the base register's\n"
+           "type is not known, so hits against unrelated structures with the\n"
+           "same offset are expected. Judge by the containing function.\n");
+    return EXIT_SUCCESS;
+}
+
 static int xrefs(const Image& image, uint32_t addr)
 {
     const std::map<uint32_t, std::string> symbols = symbolMap(image);
@@ -1075,6 +1169,11 @@ int main(int argc, char** argv)
         printf("  --disasm <addr> [count]\n");
         printf("                   disassemble guest code at an address; count 0 (or\n");
         printf("                   omitted) runs to the end of the function\n");
+        printf("  --field <disp> [--stores]\n");
+        printf("                   every load/store with this displacement — the\n");
+        printf("                   way to find who touches a struct field, which\n");
+        printf("                   --xrefs cannot do (a field access encodes no\n");
+        printf("                   address, only a base register and an offset)\n");
         printf("  --xrefs <addr>   list every branch to, and stored pointer to, an\n");
         printf("                   address — i.e. who calls or references it\n");
         return EXIT_SUCCESS;
@@ -1086,7 +1185,8 @@ int main(int argc, char** argv)
     const char* switchToml = nullptr;
     const char* writeConfig = nullptr;
     bool wantDisasm = false, wantXrefs = false;
-    uint32_t disasmAddr = 0, disasmCount = 0, xrefsAddr = 0;
+    bool wantField = false, fieldStoresOnly = false;
+    uint32_t disasmAddr = 0, disasmCount = 0, xrefsAddr = 0, fieldDisp = 0;
     for (int i = 2; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--disasm") == 0)
@@ -1114,6 +1214,22 @@ int main(int argc, char** argv)
             }
             ++i;
             wantXrefs = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--field") == 0)
+        {
+            if (i + 1 >= argc || !parseAddr(argv[i + 1], fieldDisp))
+            {
+                fprintf(stderr, "--field requires a displacement, e.g. --field 0x2ABE\n");
+                return EXIT_FAILURE;
+            }
+            ++i;
+            wantField = true;
+            if (i + 1 < argc && std::strcmp(argv[i + 1], "--stores") == 0)
+            {
+                fieldStoresOnly = true;
+                ++i;
+            }
             continue;
         }
         if (std::strcmp(argv[i], "--helpers") == 0)
@@ -1223,6 +1339,9 @@ int main(int argc, char** argv)
 
     if (wantXrefs)
         return xrefs(image, xrefsAddr);
+
+    if (wantField)
+        return fieldRefs(image, fieldDisp, fieldStoresOnly);
 
     if (stubsOut != nullptr)
         return emitStubs(image, stubsOut);
