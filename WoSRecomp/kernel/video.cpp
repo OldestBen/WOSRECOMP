@@ -247,6 +247,54 @@ void ExecutePackets(uint8_t* base, uint32_t bufferVirtual, uint32_t dwordCount, 
                 printf("\n");
             }
 
+            // Write-to-memory packets. This is the mechanism the GPU fence
+            // rides on, and executing it is the whole point of the walk.
+            //
+            // The evidence, from the first sighting of op 0x58:
+            //
+            //     00000003 00060206 A09401D4
+            //
+            // Three dwords: an initiator, an address, a value. Masking the low
+            // two selector bits off 0x00060206 gives physical 0x00060204,
+            // which aliases to virtual 0xA0060204 — and the game's own hang
+            // dump reports "Snooped 0xa0060200". The packet targets the block
+            // the game reads its GPU fence from, four bytes in.
+            //
+            // Stated as a hypothesis because it is one: the value in that
+            // first packet (0xA09401D4) points into the command buffer the
+            // packet itself lives in, which reads more like a progress marker
+            // than a fence counter. Both are things the game polls, and both
+            // are stuck for the same reason, so executing the write is worth
+            // doing either way. Every write is logged for the first few so a
+            // run says plainly whether the values look like a fence.
+            //
+            // Bounded to the physical alias window: a misparsed packet must
+            // not be able to scribble on the image or the heap.
+            if ((opcode == 0x58 || opcode == 0x46 || opcode == 0x5A) && count >= 3)
+            {
+                const uint32_t rawAddr = wos::LoadU32(base, bufferVirtual + (i + 2) * 4);
+                const uint32_t value = wos::LoadU32(base, bufferVirtual + (i + 3) * 4);
+                const uint32_t target = PhysicalToVirtual(rawAddr & ~3u);
+
+                if (target >= kPhysicalAlias && target < 0xC0000000u)
+                {
+                    wos::StoreU32(base, target, value);
+
+                    static unsigned s_logged = 0;
+                    if (s_logged < 12)
+                    {
+                        ++s_logged;
+                        printf("[gpu] op=0x%02X write: raw 0x%08X -> virtual 0x%08X = 0x%08X\n",
+                            opcode, rawAddr, target, value);
+                    }
+                }
+                else
+                {
+                    printf("[gpu] op=0x%02X write REFUSED: raw 0x%08X resolves to 0x%08X, "
+                           "outside the physical alias window\n", opcode, rawAddr, target);
+                }
+            }
+
             if (opcode == kPm4IndirectBuffer && count >= 2 && depth < 4)
             {
                 const uint32_t ibPhysical = wos::LoadU32(base, bufferVirtual + (i + 1) * 4);
