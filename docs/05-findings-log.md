@@ -917,15 +917,71 @@ than continuing to guess.
 Neither mode prints data bytes or strings: addresses, mnemonics and operands
 only, the same class of structural metadata the other modes emit.
 
+## The graphics layer, start to finish
+
+Resolved 2026-07-28. Five separate bugs, each found by measurement rather than
+inference. Recorded in order because the sequence matters: every one of them
+was hidden behind the one before it.
+
+1. **`r13` was never set.** It is the per-thread block pointer on Xbox 360,
+   not a scratch register. Null meant every access through it read the zero
+   page, so the GPU watchdog's clock was permanently 0 and its 5000-tick
+   deadline could never be reached. The game spun forever without ever
+   reaching its own timeout handler. Found from a three-instruction
+   disassembly of guest 0x82B13200 plus a harness log line showing a read of
+   guest 0x100.
+
+2. **Video driver addresses are physical, not virtual.** `MmGetPhysicalAddress`
+   is `addr & 0x1FFFFFFF`, and the game calls it before `VdInitializeRingBuffer`
+   and `VdEnableRingBufferRPtrWriteBack`. We wrote the read pointer to guest
+   0x0006023C instead of its alias at 0xA006023C — an unrelated page, which the
+   harness then committed on first touch, making the mistake look deliberate.
+
+3. **Nothing executed the command packets.** The game's fence rides on PM4
+   opcode 0x58, which writes a value to an address. Two per frame: a progress
+   pointer to Snooped+4 and a counter to Snooped. Unexecuted, the GPU fence sat
+   at 1 while the CPU fence climbed.
+
+4. **The ring size argument is a log2 dword count, not bytes.** Reading it as
+   bytes put the capacity at a quarter of its real value; once the write
+   pointer passed it, the consumer hit a bounds guard and returned *silently*
+   while still publishing the read pointer as caught up. The fence froze at
+   exactly 0x54f in two consecutive runs — that reproducibility was the tell,
+   since a timing gap does not land on the same value twice.
+
+5. **`NtWaitForMultipleObjectsEx` was an unimplemented stub.** Returning
+   success to a *wait* inverts the call's timing semantics and turns a block
+   into a busy-spin: 11.7 million calls per five seconds, lockstep with
+   `NtSetEvent` and `NtReleaseMutant`.
+
+Result: `ERR[D3D]: The GPU is hung!` no longer appears, the ring flows
+continuously with the read pointer tracking a few dwords behind the write
+pointer, and the import heartbeat fell from 58,317,635 calls per five seconds
+to 9,763 — a factor of about 6,000.
+
+**The recurring pattern, stated once more because it has now cost five runs:**
+a stub that returns success to a wait is worse than one that returns an error,
+and a bounds check that returns silently is worse than one that crashes. Both
+produce a system that looks healthy in every log line while doing nothing.
+
 ## Open questions / blockers
 
-- **The game is stable but idle.** Eight guest threads run, the vblank
-  interrupt fires at 60 Hz, ~24 MB of GPU buffers are allocated, but `VdSwap`
-  has never been called and no frame has ever been presented. Every thread
-  waits; nothing signals. The two graphics threads wait on events at
-  `ctx+0x20` (logged as `ev5`/`ev6`); both show 0 signals.
-- **The main thread spins at `sub_82AC0C10 +0x212`.** Fixing the interrupt
-  callback's argument count advanced it from `+0x1B7` (calling into
-  `sub_82B13200`) to `+0x212`, 91 bytes further into the same function —
-  progress, not a fix. What it polls there is the next thing to read with
-  `--disasm`, not to infer.
+- **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
+  `NtWaitForMultipleObjectsEx` (threads entering at 0x82A7CD00 and 0x829677D0,
+  both through `sub_82B16CC8`), and the guest-embedded event at 0x4083FDCC via
+  `KeWaitForSingleObject`. These are now genuine blocks rather than spins, so
+  the question is which code path is meant to signal them. `xex_info --xrefs`
+  on the relevant thunk is the way to find out.
+- **Archive loading stops after one read.** `game.XEPACK` is opened and the
+  first 0x80000 bytes are read, then nothing further.
+- **`VdSwap` has still never been called**, so no frame has been presented.
+- **Diagnostic output interleaves.** The all-thread stack dump and the blocked
+  -wait reporter print from different threads without a shared lock, so their
+  lines shred each other. Some frames also come back as `(no symbol)` mid-walk.
+  Cosmetic, but it made the last run materially harder to read.
+- **`[file] open FAILED "B<garbage>"`** — a filename built from wrong data,
+  appearing right after `RtlMultiByteToUnicodeN`/`RtlUnicodeToMultiByteN` are
+  first called. Points at a string conversion, not a missing file.
+- **`\Device\Harddisk0\partition0` reports "no game root configured"** when a
+  root *is* configured — the failure message is wrong even if the failure
+  is not.
