@@ -1949,6 +1949,46 @@ Worth doing for correctness, not only speed — apparatus that serialises every
 guest thread through one lock and one allocator is not measuring the system it
 is attached to.
 
+## One create site, one set site — and the setter is not the problem
+
+2026-07-28, run 20260728-144356. The event lifecycle report resolves it:
+
+    ev0  0x00010008 manual 138515/11992/4458  created bl@0x82B16368  last set bl@0x82B16C58
+    ev1  0x0001000C manual    207/0/4457      created bl@0x82B16368  last set bl@0x82B16C58
+    ev2  0x00010024 auto         1/0/0        created bl@0x82B16368  NEVER SET BY ANYONE
+    ev3  0x0001002C auto         1/0/1        created bl@0x82B16368  last set bl@0x82B16C58
+    ev4  0x00010030 auto         1/0/0        created bl@0x82B16368  NEVER SET BY ANYONE
+    ev7  0x00010048 manual       1/0/0        created bl@0x82B16368  NEVER SET BY ANYONE
+    ev8  0x0001004C manual       1/0/0        created bl@0x82B16368  NEVER SET BY ANYONE
+    ev9  0x00010050 auto         1/0/0        created bl@0x82B16368  NEVER SET BY ANYONE
+    ev10 0x00010060 auto         1/0/1        created bl@0x82B16368  last set bl@0x82B16C58
+    ev11 0x82F7700C manual       1/0/1        (embedded)  last set bl@0x829F482C
+
+Every handle-based event is created at one address and set from one address.
+That corroborates a much earlier finding by an independent route: `--xrefs` on
+the `NtSetEvent` thunk (0x82BDC74C) returned exactly one call site, 82B16C58.
+So 0x82B16xxx is the game's OS abstraction — one create wrapper, one set
+wrapper, one wait wrapper (sub_82B16CC8) — and every event passes through it.
+
+**The setter is therefore not broken.** It runs constantly: 4,458 signals on
+ev0 and 4,457 on ev1 across the run. It is simply never called with the five
+handles that matter. This is a producer that never produces, not a kernel
+object that fails to signal — a distinction worth having, because every
+hypothesis so far assumed the latter.
+
+**Why --xrefs cannot take this further.** These are runtime handle values held
+in a game structure, not constants in the instruction stream, so there is
+nothing to cross-reference. The remaining route is reading the waiter.
+
+sub_829677D0 is the thread the game itself names **"Game Master"** (via the
+RtlRaiseException thread-naming exception). It is the top-level orchestrator,
+it is blocked on ev2 and ev4, and it has never been dumped.
+
+**Run quality note.** This was the longest clean run yet — write pointer past
+0x6B35, roughly two minutes, one capacity growth, no GPU hang, no crash. The
+adaptive ring capacity is holding, and no wrap has occurred yet, so the ring
+size encoding is still open.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

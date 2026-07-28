@@ -36,9 +36,13 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 - **Asset loading works, partially.** `game_shared.ini`, `amalga.toc` and
   774 KB out of `SOUNDSRC_RVB.PCK` all load. `game.XEPACK` still stops after
   a single 0x80000 read.
-- **Two loader threads block forever** in `NtWaitForMultipleObjectsEx` via
-  `sub_82B16CC8` — `sub_829677D0` (the "Game Master") and `sub_82A7CD00`.
-  This is the current blocker for the rest of asset loading.
+- **Two threads block forever** waiting on five events nobody signals:
+  `sub_829677D0` (the "Game Master") on handles 0x00010024/0x00010030, and
+  `sub_82A7CD00` on 0x00010048/0x0001004C/0x00010050. Every event in the game
+  is created at guest `0x82B16368` and set from guest `0x82B16C58`; the setter
+  runs constantly (4,400+ signals on other events) and is simply never called
+  with these five. **A producer that never produces, not a broken primitive.**
+  Reading `sub_829677D0` is the next step.
 - **The ring size encoding is unconfirmed.** `VdInitializeRingBuffer` is
   given a raw argument of 0xE; a modelled 0x4000 dwords is too small, since
   the write pointer passes it without wrapping. The capacity now grows and
