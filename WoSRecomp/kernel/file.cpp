@@ -416,6 +416,8 @@ PPC_FUNC(__imp__NtReadFile)
     WOS_IMPORT_STUB("NtReadFile");
 
     const uint32_t eventHandle = ctx.r4.u32;
+    const uint32_t apcRoutine = ctx.r5.u32;
+    const uint32_t apcContext = ctx.r6.u32;
     const uint32_t ioStatusBlock = ctx.r7.u32;
     const uint32_t buffer = ctx.r8.u32;
     const uint32_t length = ctx.r9.u32;
@@ -454,6 +456,32 @@ PPC_FUNC(__imp__NtReadFile)
     // rather than leaving a waiter stuck forever.
     if (eventHandle != 0)
         wos::SignalEventIfAny(eventHandle);
+
+    // The completion APC is dropped, and this says so.
+    //
+    // An async NtReadFile can carry a PIO_APC_ROUTINE that the kernel runs when
+    // the transfer finishes. We ignore it. That is a candidate explanation for
+    // the Game Master's deadlock: the completion routine at guest 0x82965488
+    // marks a request object done and signals the very event it is blocked on,
+    // and if an APC is how that routine gets called, dropping the APC would
+    // leave every request stuck in state 1 forever.
+    //
+    // Logged rather than implemented, because whether the game passes one at
+    // all is a question with a yes/no answer and no reason to guess it. If this
+    // line never appears, APCs are not the mechanism and the completion is
+    // driven from somewhere else.
+    if (apcRoutine != 0)
+    {
+        static unsigned s_logged = 0;
+        if (s_logged < 8)
+        {
+            ++s_logged;
+            printf("[file] read carried a completion APC: routine 0x%08X context "
+                   "0x%08X — WE DROP THIS\n", apcRoutine, apcContext);
+            if (s_logged == 8)
+                printf("[file] (further APC notices suppressed)\n");
+        }
+    }
 
     printf("[file] read %zu of 0x%X bytes from \"%s\" into guest 0x%08X\n",
         read, length, file->guestPath.c_str(), buffer);
