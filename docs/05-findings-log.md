@@ -2067,6 +2067,35 @@ is refused unless the masked address resolves to a real recompiled function,
 and says so. A wrong reading of the encoding reports itself rather than
 jumping into nothing.
 
+## APC delivered, nothing changed
+
+2026-07-28, run 20260728-183936. The delivery works and is not the fix:
+
+    [file] delivering completion APC 0x82B16659 -> 0x82B16658, context 0x829688C0
+
+No crash, no unresolved-function refusal, and the run is otherwise identical:
+ev2/ev4/ev7/ev8/ev9 still NEVER SET BY ANYONE, imports still 76, game.XEPACK
+still one 0x80000 read, both threads still blocked.
+
+What that does establish: 0x82B16658 resolves to a real recompiled function and
+returns normally, so masking the low bits off 0x82B16659 is very likely the
+right reading of the encoding. The address was the one guess in the change and
+it appears to have been a good one.
+
+What it leaves open, in the order worth testing:
+
+1. The routine runs and bails on a check — most likely, and readable.
+2. The argument convention is wrong. Standard NT is
+   `(ApcContext, IoStatusBlock, Reserved)` in r3/r4/r5, which is what is
+   passed, but the Xbox variant is not something we have confirmed.
+3. 0x82B16658 is a trampoline rather than the completion itself. `context
+   0x829688C0` is an address inside .text — a *code* address as an ApcContext
+   is unusual, and fits a handler whose job is to call the context.
+
+Recorded as a negative result with the mechanism intact rather than as a
+failure: the delivery path now exists and is proven to reach guest code, which
+is a prerequisite for whatever the right completion turns out to be.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
