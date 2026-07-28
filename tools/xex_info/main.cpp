@@ -913,6 +913,23 @@ static int disasm(const Image& image, uint32_t addr, uint32_t count)
 // Pointing this at an import thunk lists every call site of that kernel
 // function — e.g. every place the game calls KeSetEvent.
 // ---------------------------------------------------------------------------
+// How many bytes of a section are actually backed by the decrypted image.
+//
+// A section's declared size can run past the end of the buffer — this XEX's
+// .reloc declares 0xCCC80 but only 0x5F000 is present, which the harness
+// already reports as CLAMPED when mapping. Scanning the declared size walks
+// off the end of the allocation, which is what made --xrefs segfault after
+// printing correct results.
+static uint32_t backedSize(const Image& image, const Section& s)
+{
+    const uint8_t* imageBegin = image.data.get();
+    const uint8_t* imageEnd = imageBegin + image.size;
+    if (s.data == nullptr || s.data < imageBegin || s.data >= imageEnd)
+        return 0;
+    const size_t available = size_t(imageEnd - s.data);
+    return (available < s.size) ? uint32_t(available) : s.size;
+}
+
 static int xrefs(const Image& image, uint32_t addr)
 {
     const std::map<uint32_t, std::string> symbols = symbolMap(image);
@@ -933,7 +950,8 @@ static int xrefs(const Image& image, uint32_t addr)
     {
         if (!(s.flags & SectionFlags_Code) || s.data == nullptr)
             continue;
-        for (uint32_t off = 0; off + 4 <= s.size; off += 4)
+        const uint32_t limit = backedSize(image, s);
+        for (uint32_t off = 0; off + 4 <= limit; off += 4)
         {
             uint32_t raw;
             std::memcpy(&raw, s.data + off, 4);
@@ -960,7 +978,8 @@ static int xrefs(const Image& image, uint32_t addr)
     {
         if (s.data == nullptr)
             continue;
-        for (uint32_t off = 0; off + 4 <= s.size; off += 4)
+        const uint32_t limit = backedSize(image, s);
+        for (uint32_t off = 0; off + 4 <= limit; off += 4)
         {
             uint32_t raw;
             std::memcpy(&raw, s.data + off, 4);
