@@ -1473,6 +1473,67 @@ that repoints the command-buffer cursor, base and limit at [ctx+0x4158]+0x12C0.
 Proximity was not evidence. The listing now shows the value, which is what
 made this checkable in one dump rather than by argument.
 
+## sub_82ABA260 is a fence wait, and its guarantee is one we can break
+
+2026-07-28. The main thread's frame #1, finally read. 51 instructions, ends on
+a terminator.
+
+    82ABA26C  mr   r30,r4            ; r30 = target fence value
+    82ABA270  mr   r31,r3            ; r31 = device
+    82ABA278  cmplwi cr6,r30,0
+    82ABA27C  beq  return            ; target 0 -> nothing to wait for
+    82ABA280  lwz  r11,10896(r31)    ; [device+0x2A90] -> the GPU fence
+    82ABA284  lwz  r10,10908(r31)    ; [device+0x2A9C] =  the CPU fence
+    82ABA288  subf r9,r30,r10        ; r9  = cpu - target
+    82ABA28C  lwz  r11,0(r11)        ; r11 = *gpu_fence
+    82ABA290  subf r11,r11,r10       ; r11 = cpu - gpu
+    82ABA294  cmplw cr6,r9,r11       ; UNSIGNED
+    82ABA298  bge  cr6,return        ; done when (cpu-target) >= (cpu-gpu)
+    ...
+    82ABA2F4  bl   0x82ac0c10        ; the stall/timeout predicate
+    82ABA2F8  cmpwi r3,0
+    82ABA2FC  beq  0x82aba31c        ; predicate says give up -> leave
+    82ABA300  > (the same comparison again)
+    82ABA318  blt  cr6,0x82aba2f0    ; not reached yet -> loop
+
+This is the textbook wraparound-safe fence wait: subtract both the target and
+the completed value from the CPU counter and compare unsigned, so the test
+stays correct across a 2^32 wrap. sub_82AC0C10 is not the loop condition at
+all — it is only the stall-and-timeout check between iterations, which is why
+its `[device+0x2ABD]` exit is an abort path.
+
+There is also a deadlock guard at 82ABA2A4 that had not been seen: if the
+target equals the *current* CPU fence — work that has not been submitted yet —
+it calls sub_82ABAAD8 to flush the command buffer first, so the GPU can
+actually reach the value. That explains why sub_82ABAAD8 sets +0x2ABD bit 1
+after calling this: it is the submit path.
+
+**The wraparound trick holds on exactly one assumption: the GPU fence never
+runs ahead of the CPU fence.** If it does, `cpu - gpu` underflows to a huge
+unsigned value, `(cpu - target)` stays small, the `bge` is never taken, and the
+wait becomes unsatisfiable regardless of what the GPU does afterwards.
+
+That is a failure *our side can cause*, which is what makes it worth measuring
+rather than assuming. The guest advances the CPU counter only when it submits
+work; our command processor advances the GPU counter by executing whatever
+memory-write packets it finds in the ring. Any over-execution — re-running a
+region, mis-parsing a packet boundary, following an indirect buffer twice —
+shows up as a crossing. The observed fence climbing at a steady 64 Hz while the
+game is blocked and submitting nothing is consistent with that, and also
+consistent with the game still submitting; the two are distinguishable only by
+reading the CPU counter.
+
+The probe now reads `[device+0x2A9C]` alongside the GPU fence, reports the
+signed difference, and latches the FIRST crossing rather than the latest —
+once they diverge every later sample looks crossed, and the pair of values at
+the moment it happened is what says how far we over-ran.
+
+**Which also resolves the +0x2ABE puzzle.** No store in the image sets bit 1
+of the present gate, and sub_82AC4E48 has three callers, only one of which is
+the graphics thread. The graphics-thread path is a secondary, deferred present
+gated on a flag the primary path sets; it is not the route to a frame. The
+main thread is.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
