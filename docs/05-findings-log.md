@@ -1651,6 +1651,55 @@ this problem, it moved it. The unimplemented stub returned instantly and logged
 34 M. The call count was never the bug — it was always a symptom of a loop
 whose exit condition is not being met, and only the call site can say which.
 
+## The ring capacity is still wrong, and refusing to consume hangs the GPU
+
+2026-07-28, run 20260728-132051. The longest run yet — about ninety seconds —
+and it ends in a real failure rather than an idle:
+
+    [gpu] write pointer 0x4003 is past the ring capacity 0x4000 — not consuming.
+    [game] ERR[D3D]: The GPU is hung!
+    [game] CPU fence 0x1553, GPU fence 0x154f
+    [game] CP_RB_RPTR: 0x00004003   CP_RB_WPTR: 0x00004003
+
+The write pointer walked past 0x4000 monotonically — 0x3EA1, 0x4003, 0x4009 —
+with no wrap. A ring index cannot exceed the ring it indexes, so a modelled
+capacity of 0x4000 dwords is still too small. The log2-dword reading fixed the
+earlier factor-of-four error but is not the whole encoding.
+
+Two changes, neither of which guesses at the encoding:
+
+- `VdInitializeRingBuffer` logs the **raw** argument as well as the derived
+  size, so the encoding can be settled from evidence.
+- `ConsumeRing` grows its capacity to the next power of two and continues,
+  reporting once, instead of refusing to consume. Refusing is what turns this
+  into a hang: the fence freezes, and the game's D3D layer declares the GPU
+  hung within seconds. A wptr past capacity is proof our number is wrong, not
+  a reason to stop.
+- The wrap is now reported when it happens. The highest write pointer seen
+  immediately before wptr drops IS the ring's true size, which settles the
+  encoding by measurement rather than by argument.
+
+## The Sleep spin has one call site
+
+2026-07-28. `[callsites]` in the same run:
+
+    bl@0x82B1A680 -> KeDelayExecutionThread  19418004 call(s), last arg 0xFFFFFFFF
+
+One site, 19.4 million calls, and the count is *frozen* across every later
+heartbeat — 19418004, then 19418006, 19418008, 19418010. So this is not an
+ongoing spin at all: it burned 19 M calls during startup and then went quiet,
+ticking over about twice per five seconds afterwards.
+
+The sustained 34 M figure from the previous run was startup traffic landing
+inside the sampling window, not a steady-state spin. The `last arg 0xFFFFFFFF`
+is the sentinel this code writes for the absolute-time branch, so those calls
+took the yield path.
+
+Recorded because it closes a line of investigation cheaply: there is no Sleep
+spin to fix. The call-site census earned its keep by ruling something out
+rather than finding something, which is the more common and less satisfying
+half of what a measurement does.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

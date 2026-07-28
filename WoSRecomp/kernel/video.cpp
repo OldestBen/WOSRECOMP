@@ -353,18 +353,49 @@ void ConsumeRing(uint8_t* base, uint32_t wptr)
     // consumption stopped dead while the read pointer kept being published as
     // caught up. That is why the fence froze at exactly 0x54f in two
     // consecutive runs regardless of how often the ring was polled.
-    const uint32_t capacity = size;
-    if (wptr > capacity)
+    // The modelled capacity comes from an argument encoding we have not
+    // confirmed, and being wrong here is fatal in a specific way: refusing to
+    // consume freezes the GPU fence, the game's D3D layer notices within a few
+    // seconds and declares the GPU hung. That is exactly what happened once
+    // when the size was read as bytes, and again at wptr 0x4003 against a
+    // modelled 0x4000.
+    //
+    // A write pointer cannot exceed the ring it indexes, so a wptr past
+    // capacity is proof our number is too small — not a reason to stop. Grow to
+    // the next power of two, say so once, and keep consuming. The value it
+    // settles at is the measurement: whatever the wptr reaches just before it
+    // finally wraps to zero IS the real ring size, and that will settle the
+    // encoding without another round of guessing.
+    static uint32_t s_capacity = 0;
+    if (s_capacity < size)
+        s_capacity = size;
+
+    if (wptr > s_capacity)
     {
-        // Never fail silently here again.
-        static bool s_warned = false;
-        if (!s_warned)
+        uint32_t grown = (s_capacity == 0) ? 1u : s_capacity;
+        while (grown < wptr && grown < (1u << 30))
+            grown <<= 1;
+
+        printf("[gpu] write pointer 0x%X exceeds modelled ring capacity 0x%X — "
+               "the size argument encoding is wrong. Growing to 0x%X and "
+               "continuing; refusing to consume is what hangs the GPU.\n",
+            wptr, s_capacity, grown);
+        s_capacity = grown;
+    }
+    const uint32_t capacity = s_capacity;
+
+    // Report the wrap when it happens: the highest write pointer seen before
+    // the wrap is the ring's true size in dwords.
+    if (wptr < s_consumed)
+    {
+        static uint32_t s_highWater = 0;
+        if (s_consumed > s_highWater)
         {
-            s_warned = true;
-            printf("[gpu] write pointer 0x%X is past the ring capacity 0x%X — "
-                   "not consuming. The ring size is being misread.\n", wptr, capacity);
+            s_highWater = s_consumed;
+            printf("[gpu] ring wrapped: highest write pointer before the wrap was "
+                   "0x%X, so the true ring size is that plus the last packet.\n",
+                s_highWater);
         }
-        return;
     }
     if (wptr == s_consumed)
         return;
@@ -678,14 +709,23 @@ PPC_FUNC(__imp__VdInitializeRingBuffer)
     // put the capacity at a quarter of its real value, and the game drove the
     // write pointer past it — proof enough, since a write pointer cannot
     // exceed the buffer it indexes.
+    //
+    // That reading is still not confirmed: a later run drove the write pointer
+    // to 0x4003 against a modelled capacity of 0x4000, monotonically, with no
+    // wrap. A ring index cannot exceed its ring, so 0x4000 dwords is still too
+    // small. The raw argument is logged rather than only the derived size, so
+    // the encoding can be settled from evidence instead of another guess — and
+    // ConsumeRing now adapts instead of stalling, because stalling is what
+    // turned this into "ERR[D3D]: The GPU is hung!" ninety seconds into a run.
     const uint32_t sizeDwords = (ctx.r4.u32 < 32) ? (1u << ctx.r4.u32) : 0;
 
     g_ringPhysical = physical;
     g_ringVirtual = virt;
     g_ringSize = sizeDwords;
 
-    printf("[video] ring buffer: physical 0x%08X -> virtual 0x%08X, size 2^%u = 0x%X dword(s)\n",
-        physical, virt, ctx.r4.u32, sizeDwords);
+    printf("[video] ring buffer: physical 0x%08X -> virtual 0x%08X, "
+           "raw size arg 0x%X (%u) -> 2^%u = 0x%X dword(s) assumed\n",
+        physical, virt, ctx.r4.u32, ctx.r4.u32, ctx.r4.u32, sizeDwords);
     ctx.r3.u64 = 0;
 }
 #endif
