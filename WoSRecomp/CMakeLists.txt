@@ -42,6 +42,7 @@ set(WOS_SOURCES
     # listed in kernel/kernel_overrides.h, which compiles out the matching
     # generated stub — otherwise the two collide at link time.
     kernel/panic.cpp
+    kernel/format.cpp
     kernel/memory.cpp
     kernel/pcr.cpp
     kernel/system.cpp

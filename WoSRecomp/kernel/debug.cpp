@@ -9,11 +9,13 @@
 #include "import_log.h"
 #include "kernel_overrides.h"
 #include "guest.h"
+#include "format.h"
 
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <algorithm>
 
 namespace
 {
@@ -44,18 +46,77 @@ void PrintGuestString(uint8_t* base, uint32_t addr, const char* tag)
     printf("[%s] %.*s\n", tag, int(len), s);
 }
 
+// Print an already-formatted string, same trimming and bounding as above.
+void PrintFormatted(const std::string& text, const char* tag)
+{
+    size_t len = text.size();
+    while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r'))
+        --len;
+    if (len == 0)
+        return;
+
+    std::lock_guard<std::mutex> lock(g_printMutex);
+    printf("[%s] %.*s\n", tag, int(len), text.c_str());
+}
+
 } // namespace
 
 #ifdef WOS_IMPL_DbgPrint
+// VOID DbgPrint(const char* format, ...);
+//   r3 = format, r4..r10 = the first seven arguments
+//
+// This is variadic, not a pre-formatted string. Printing r3 raw was throwing
+// away every number the game reports — including the "CPU fence 0x%x, GPU
+// fence 0x%x" line in its GPU-hang dump, which is the one that says whether
+// the GPU is behind and by how much.
 PPC_FUNC(__imp__DbgPrint)
 {
     WOS_IMPORT_STUB("DbgPrint");
-    // r3 is the format string. The game formats with _vsnprintf first in the
-    // common case, so by the time it reaches here the text is usually already
-    // complete. Where it is not, the conversion specifiers show through
-    // unsubstituted — visible and obviously wrong, rather than silently
-    // dropped.
-    PrintGuestString(base, ctx.r3.u32, "game");
+
+    wos::RegisterArgs args;
+    args.add(ctx.r4.u64);
+    args.add(ctx.r5.u64);
+    args.add(ctx.r6.u64);
+    args.add(ctx.r7.u64);
+    args.add(ctx.r8.u64);
+    args.add(ctx.r9.u64);
+    args.add(ctx.r10.u64);
+
+    PrintFormatted(wos::FormatGuest(base, ctx.r3.u32, args), "game");
+}
+#endif
+
+#ifdef WOS_IMPL_sprintf
+// int sprintf(char* buffer, const char* format, ...);
+//   r3 = buffer, r4 = format, r5..r10 = the first six arguments
+PPC_FUNC(__imp__sprintf)
+{
+    WOS_IMPORT_STUB("sprintf");
+
+    const uint32_t buffer = ctx.r3.u32;
+    if (buffer == 0 || ctx.r4.u32 == 0)
+    {
+        ctx.r3.u64 = uint32_t(-1);
+        return;
+    }
+
+    wos::RegisterArgs args;
+    args.add(ctx.r5.u64);
+    args.add(ctx.r6.u64);
+    args.add(ctx.r7.u64);
+    args.add(ctx.r8.u64);
+    args.add(ctx.r9.u64);
+    args.add(ctx.r10.u64);
+
+    const std::string text = wos::FormatGuest(base, ctx.r4.u32, args);
+
+    // sprintf has no bound. The guest chose the buffer size and we cannot see
+    // it, so this writes what the guest asked for — the same exposure the game
+    // has on real hardware.
+    char* dst = wos::GuestPtr(base, buffer);
+    std::memcpy(dst, text.c_str(), text.size() + 1);
+
+    ctx.r3.u64 = uint32_t(text.size());
 }
 #endif
 
@@ -71,15 +132,9 @@ PPC_FUNC(__imp__OutputDebugStringA)
 // int _vsnprintf(char* buffer, size_t count, const char* format, va_list args);
 //   r3 = buffer, r4 = count, r5 = format, r6 = va_list
 //
-// LIMITATION, stated plainly: the arguments are not substituted. Doing that
-// properly means walking a PowerPC va_list — eight GPR slots, then the stack,
-// with separate float registers and its own alignment rules — and getting it
-// subtly wrong would produce plausible-looking but false log messages, which
-// is worse than none.
-//
-// So the format string is copied through verbatim. Literal messages (most of
-// them) come out perfectly; the rest arrive with their %s and %d intact, which
-// is unmistakably a limitation rather than a lie.
+// The va_list case is the well-defined one: on this ABI it is a pointer to the
+// next 8-byte argument slot, so the arguments really can be walked rather than
+// guessed at. This used to copy the format string through verbatim.
 PPC_FUNC(__imp___vsnprintf)
 {
     WOS_IMPORT_STUB("_vsnprintf");
@@ -94,17 +149,15 @@ PPC_FUNC(__imp___vsnprintf)
         return;
     }
 
-    const char* src = wos::GuestPtr(base, format);
+    wos::GuestVaListArgs args(base, ctx.r6.u32);
+    const std::string text = wos::FormatGuest(base, format, args);
+
     char* dst = wos::GuestPtr(base, buffer);
+    const size_t n = std::min<size_t>(text.size(), count - 1);
+    std::memcpy(dst, text.c_str(), n);
+    dst[n] = '\0';
 
-    size_t i = 0;
-    while (i + 1 < count && src[i] != '\0')
-    {
-        dst[i] = src[i];
-        ++i;
-    }
-    dst[i] = '\0';
-
-    ctx.r3.u64 = uint32_t(i);
+    // The real _vsnprintf returns -1 when the text did not fit.
+    ctx.r3.u64 = (text.size() >= count) ? uint32_t(-1) : uint32_t(n);
 }
 #endif

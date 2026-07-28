@@ -515,8 +515,23 @@ LONG WINAPI CrashReporter(EXCEPTION_POINTERS* info)
                 (void*)g_guestBase, (void*)(g_guestBase + g_guestSize));
             printf("  -> host-side bug: the reservation covers the entire 32-bit\n");
             printf("     guest space, so this cannot be a guest access.\n");
+            printf("     Offset from the guest base: %s0x%llX\n",
+                (reinterpret_cast<uintptr_t>(addr) < g_guestBase) ? "-" : "+",
+                (unsigned long long)((reinterpret_cast<uintptr_t>(addr) < g_guestBase)
+                    ? g_guestBase - reinterpret_cast<uintptr_t>(addr)
+                    : reinterpret_cast<uintptr_t>(addr) - g_guestBase));
         }
     }
+
+    // The stack of the faulting thread.
+    //
+    // Without this a crash reports an address and nothing else, which names
+    // neither the guest function nor the host code that went wrong — the last
+    // one cost a whole round trip. The filter runs on the faulting thread, so
+    // a plain capture of the current stack is the right one; the top few
+    // frames are this reporter and can be read past.
+    printf("\n=== faulting thread stack ===\n");
+    wos::PrintGuestStack(32);
 
     if (g_autoCommitCount.load() > 0)
     {
