@@ -149,6 +149,7 @@
 #define WOS_IMPL_VdRetrainEDRAM 1
 #define WOS_IMPL_VdRetrainEDRAMWorker 1
 #define WOS_IMPL_VdPersistDisplay 1
+#define WOS_IMPL_VdGetSystemCommandBuffer 1
 #define WOS_IMPL_VdSwap 1
 
 // ---------------------------------------------------------------------------

@@ -60,6 +60,13 @@ constexpr uint32_t kGpuReadPointerReg  = kGpuRegisterBase + 0x710;
 // see the comment at the call site.
 constexpr uint32_t kGpuVblankStatusReg = kGpuRegisterBase + 0x6544;
 
+// The system command buffer handed back by VdGetSystemCommandBuffer, and the
+// descriptor that accompanies it. The descriptor size is generous rather than
+// exact — the caller reads +4 and +8, and over-allocating costs nothing while
+// a short block would let an unknown field scribble past the end.
+constexpr uint32_t kSystemCommandBufferSize = 0x10000;
+constexpr uint32_t kSystemDescriptorSize    = 0x20;
+
 // Every address the game hands the video driver is a PHYSICAL address.
 //
 // MmGetPhysicalAddress is `addr & 0x1FFFFFFF` — it strips the alias window and
@@ -739,6 +746,53 @@ PPC_FUNC(__imp__VdPersistDisplay)
 {
     WOS_IMPORT_STUB("VdPersistDisplay");
     ctx.r3.u64 = 1;
+}
+#endif
+
+#ifdef WOS_IMPL_VdGetSystemCommandBuffer
+// VOID VdGetSystemCommandBuffer(VOID* outDescriptor, DWORD* outValue);
+//   r3 = descriptor out, r4 = single dword out
+//
+// Unimplemented until now, which made it a generated stub that wrote nothing
+// to either out-parameter — the same failure as NtQueryInformationFile early
+// on. Its caller, guest 0x82AC4E48, does:
+//
+//     82AC5030  bl VdGetSystemCommandBuffer   ; r3 = &sp[208], r4 = &sp[116]
+//     82AC5040  lwz r11,116(r1)               ; the r4 out-value
+//     82AC5048  stw r11,8(r10)                ; -> [ctx+0x2A90]+8
+//     82AC5088  addi r6,r1,208                ; the r3 struct, passed on to...
+//     82AC5094  bl VdSwap
+//
+// so it read four uninitialised stack slots and handed them to VdSwap — the
+// call that has never fired in any run.
+//
+// The r4 value is a pointer to the system command buffer; hand back a real
+// allocation so the store into the graphics context is meaningful. The r3
+// descriptor's layout is NOT established: the caller reads +4 and +8 from it
+// and passes the whole thing to VdSwap. Zero it rather than invent fields —
+// the caller's own test is `if ([r3+8] != 0) store it`, so zero takes the
+// conservative branch instead of committing to a guess. If a run shows it
+// needs real contents, that is a measurement away.
+PPC_FUNC(__imp__VdGetSystemCommandBuffer)
+{
+    WOS_IMPORT_STUB("VdGetSystemCommandBuffer");
+
+    static uint32_t s_commandBuffer = 0;
+    if (s_commandBuffer == 0)
+    {
+        s_commandBuffer = wos::GuestAlloc(base, 0, kSystemCommandBufferSize, 0x1000);
+        printf("[video] system command buffer at guest 0x%08X (0x%X bytes)\n",
+            s_commandBuffer, kSystemCommandBufferSize);
+    }
+
+    if (ctx.r3.u32 != 0)
+    {
+        for (uint32_t i = 0; i < kSystemDescriptorSize; i += 4)
+            wos::StoreU32(base, ctx.r3.u32 + i, 0);
+    }
+
+    if (ctx.r4.u32 != 0)
+        wos::StoreU32(base, ctx.r4.u32, s_commandBuffer);
 }
 #endif
 
