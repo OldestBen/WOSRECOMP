@@ -30,6 +30,23 @@ void DumpImportLog();
 // into a hang, which is strictly worse than a slightly racy one.
 void DumpImportLogUnsafe();
 
+// Record which guest instruction called an import, and with what argument.
+//
+// The heartbeat answers "which import is hot"; it cannot answer "which line of
+// game code is calling it", and for a spin those are different questions with
+// different fixes. XenonRecomp writes the guest return address into ctx.lr
+// immediately before every `bl`, so an implementation can name its own call
+// site for free — the same trick the wait census uses, generalised so any hot
+// import can be attributed without building a bespoke probe each time.
+//
+// `detail` is whatever single number makes the call legible: a sleep duration,
+// a handle, a size. Bounded internally; recording is cheap enough to sit in a
+// path called millions of times a second.
+void LogCallSite(const char* name, uint32_t callSite, uint32_t detail);
+
+// Print the recorded call sites, busiest first. Called from the heartbeat.
+void ReportCallSites();
+
 // A snapshot of call counts, for the periodic heartbeat. Returns pairs of
 // (name, total calls so far), so a caller can diff two snapshots and see what
 // the game is actually busy doing rather than only what it touched first.

@@ -256,9 +256,18 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
 {
     WOS_IMPORT_STUB("KeDelayExecutionThread");
 
+    // Attributed by call site because implementing it properly did not end the
+    // problem, it moved it. The stub's 45 M calls per five seconds became a
+    // sustained 34 M — a real sleep, called in a loop by something the
+    // all-thread dump cannot see, since every thread it *can* see is parked in
+    // a genuine wait. The duration is carried through as the detail: a spin on
+    // Sleep(0) and a spin on Sleep(1ms) are different bugs.
+    const uint32_t callSite = uint32_t(ctx.lr);
+
     const uint32_t intervalPtr = ctx.r5.u32;
     if (intervalPtr == 0)
     {
+        wos::LogCallSite("KeDelayExecutionThread", callSite, 0);
         std::this_thread::yield();
         ctx.r3.u64 = wos::kStatusSuccess;
         return;
@@ -269,6 +278,8 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
     {
         // Relative. A zero-length relative wait is a yield, not a sleep.
         const int64_t hundredNs = -interval;
+        wos::LogCallSite("KeDelayExecutionThread", callSite,
+            uint32_t(hundredNs / 10000));   // report in milliseconds
         if (hundredNs == 0)
             std::this_thread::yield();
         else
@@ -276,6 +287,7 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
     }
     else
     {
+        wos::LogCallSite("KeDelayExecutionThread", callSite, 0xFFFFFFFFu);
         std::this_thread::yield();
     }
 

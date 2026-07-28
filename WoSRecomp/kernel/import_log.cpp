@@ -1,5 +1,6 @@
 #include "import_log.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cinttypes>
 #include <mutex>
@@ -19,7 +20,68 @@ std::mutex g_mutex;
 std::vector<const char*> g_order;
 std::unordered_map<std::string, uint64_t> g_counts;
 
+// Bounded on purpose: the key includes a guest-controlled address, and this is
+// reached from paths running millions of times a second.
+constexpr size_t kMaxCallSites = 48;
+
+struct CallSite
+{
+    const char* name = nullptr;
+    uint32_t callSite = 0;
+    uint32_t lastDetail = 0;
+    uint64_t calls = 0;
+};
+
+std::mutex g_callSiteMutex;
+std::vector<CallSite> g_callSites;
+
 } // namespace
+
+void LogCallSite(const char* name, uint32_t callSite, uint32_t detail)
+{
+    std::lock_guard<std::mutex> lock(g_callSiteMutex);
+
+    for (auto& site : g_callSites)
+    {
+        if (site.callSite == callSite && site.name == name)
+        {
+            site.lastDetail = detail;
+            ++site.calls;
+            return;
+        }
+    }
+
+    if (g_callSites.size() >= kMaxCallSites)
+        return;
+
+    g_callSites.push_back({ name, callSite, detail, 1 });
+}
+
+void ReportCallSites()
+{
+    std::vector<CallSite> rows;
+    {
+        std::lock_guard<std::mutex> lock(g_callSiteMutex);
+        rows = g_callSites;
+    }
+
+    if (rows.empty())
+        return;
+
+    std::sort(rows.begin(), rows.end(),
+        [](const CallSite& a, const CallSite& b) { return a.calls > b.calls; });
+
+    printf("[callsites] %zu site(s):\n", rows.size());
+    for (size_t i = 0; i < rows.size() && i < 6; ++i)
+    {
+        // callSite is the return address; the `bl` is four bytes back, which is
+        // the address to feed to --disasm.
+        printf("    bl@0x%08X -> %-28s %llu call(s), last arg %u (0x%X)\n",
+            rows[i].callSite - 4, rows[i].name,
+            (unsigned long long)rows[i].calls,
+            rows[i].lastDetail, rows[i].lastDetail);
+    }
+}
 
 void LogImportCall(const char* name)
 {

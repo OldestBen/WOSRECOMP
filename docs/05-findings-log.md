@@ -1601,6 +1601,56 @@ The mapping is Latin-1 <-> UTF-16, which is exact for ASCII — what asset paths
 are — and substitutes '?' for anything above 0xFF rather than pretending to
 implement a codepage we have no table for.
 
+## The string conversions were the archive blocker
+
+2026-07-28, run 20260728-125548. Implementing RtlMultiByteToUnicodeN and
+RtlUnicodeToMultiByteN removed the garbage filename and produced the first
+bulk asset load of the project:
+
+    [file] opened "D:\sound\SOUNDSRC_RVB.PCK" -> .../sound/SOUNDSRC_RVB.PCK
+    [file] read 8 of 0x8 bytes ...
+    [file] read 774194 of 0xBD032 bytes ...
+    [file] opened "D:\sound\SOUNDSRC_RVB.PCK" -> ...
+
+The uppercase name is the game round-tripping the path through both
+conversions, which is what they are there for. Where the previous run showed
+`open FAILED "B<garbage>"`, this one opens the file and reads 774 KB.
+
+Still open after the fix: game.XEPACK is still one 0x80000 read and no more,
+and threads 4101 (sub_829677D0) and 4104 (sub_82A7CD00) still block forever in
+NtWaitForMultipleObjectsEx via sub_82B16CC8. Import count unchanged at 76.
+
+## A sustained Sleep() spin, and call-site attribution for any import
+
+2026-07-28. New signal in the same run:
+
+    [heartbeat] 34328346 call(s) ... busiest: KeDelayExecutionThread x34325200
+    [heartbeat] 34441329 call(s) ... busiest: KeDelayExecutionThread x34438190
+
+6.8 million sleeps per second, *sustained*. Earlier runs showed a similar
+number in the first heartbeat only, then a collapse to about ten thousand —
+that was archive loading, transient. This one holds across every heartbeat
+while every other import sits at its normal rate.
+
+The all-thread dump cannot find it: every thread it can see is parked in a
+genuine wait, and the spinner is somewhere it cannot name. This is the same
+question the wait census answered for waits — which guest instruction is doing
+this — so the mechanism is now general rather than another bespoke probe.
+
+`wos::LogCallSite(name, ctx.lr, detail)` in import_log.cpp records
+(import, guest call site, last argument) into a bounded table, reported by the
+heartbeat as `[callsites]`. Any import can opt in with one line. The `detail`
+field carries whatever number makes the call legible; for
+KeDelayExecutionThread that is the requested delay in milliseconds, because a
+spin on Sleep(0) and a spin on Sleep(1ms) are different bugs with different
+causes.
+
+Worth recording that implementing KeDelayExecutionThread properly did not end
+this problem, it moved it. The unimplemented stub returned instantly and logged
+45 M calls per five seconds; the correct implementation sleeps and still logs
+34 M. The call count was never the bug — it was always a symptom of a loop
+whose exit condition is not being met, and only the call site can say which.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

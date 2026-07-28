@@ -898,6 +898,7 @@ int main(int argc, char** argv)
             }
 
             wos::ReportWaitActivity();
+            wos::ReportCallSites();
             wos::ReportD3DProbe(base);
 
             // "Busy" here means *new* imports appearing, not calls happening.
