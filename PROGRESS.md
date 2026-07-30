@@ -41,15 +41,20 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
   branches at `0x829654F8`/`0x82965504`, reached from a request-completion
   function at `0x82965488` with four callers, none of which has ever appeared
   on a stack. The request objects stay in state 1 instead of moving to 3.
-- **The async read works. Nobody consumes the result.** `game.XEPACK` is read,
-  the completion APC is delivered correctly, and `sub_82968498` marks the file
-  request complete — confirmed by `[req+0x20] = 0x80000`, the byte count it
-  writes only on the success path. `sub_82968498` is a state setter, not a
-  signaller; it was never meant to reach `sub_82965488`. The consumer that
-  would signal has four call sites and none has ever run. Request object [0] is
-  sitting in state 1, which is the state that signals immediately, and the
-  handle it would set — `[0x82F719DC] = 0x00010030` — is ev4, one of the exact
-  events the Game Master is blocked on. Everything is armed; nothing pumps it.
+- **THE DEADLOCK IS BROKEN.** The async read completes correctly and nothing
+  was consuming the result. Calling the consumer, `sub_82965488(0x00000080)`,
+  at APC-delivery time made the guest's own state machine run to completion on
+  its own: request object [0] went 1 → 3 → 4, its handle was recycled to
+  `0x80000080` (freed), ev4 was signalled for the first time in a dozen runs,
+  the Game Master left the wait it had been stuck in and went round its loop,
+  and the five-million-per-second `KeDelayExecutionThread` spin fell to ~120
+  calls total. The guest freeing the slot itself is the proof the call was
+  legitimate.
+- **That call is a stand-in, not a fix.** We still do not know what makes it on
+  the console. Of `sub_82965488`'s four call sites, the two that run are on the
+  submission side; the two that would consume a completion have never executed.
+  It is on by default (`WOS_NO_COMPLETE_IO` disables it) because staying
+  deadlocked finds nothing, and it is one line to remove.
 - **Asset loading works as far as it gets:** `game_shared.ini`, `amalga.toc`
   and 774 KB of `SOUNDSRC_RVB.PCK` all load correctly.
 - **The ring size encoding is still unconfirmed.** The raw argument is 0xE; a
@@ -62,22 +67,27 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-1. **Find who pumps `sub_82965488`.** Tripwires are in on all four of its
-   callers (`sub_82965D58`, `sub_829660C0`, `sub_82966C58`, `sub_82966D90`).
-   If one fires, the argument is wrong; if none fires, walk up their callers or
-   find the thread that should be running them. The request is armed and the
-   signal handle resolves to a blocked event, so this is the last link.
-2. **Then the rest of asset loading.** `game.XEPACK` past its first 0x80000,
+1. **Find the real completion mechanism.** Two threads (entries `0x82A25CE8`
+   and `0x829F4C80`) start and immediately return; a worker that runs its body
+   once and exits is a worker whose loop condition was false on the first test,
+   and an async-I/O worker calling `sub_82965D58` in a loop is exactly the
+   shape of the missing piece. `KeInitializeSemaphore` is also an untouched
+   stub with no semaphore object type behind it — if that queue is a semaphore,
+   the worker has nothing to wait on.
+2. **Then chase the next block.** Thread 4104 still waits forever on
+   {`0x00010050`, `0x00010048`, `0x0001004C`}, and a graphics thread still
+   waits on `0x4083FDCC`. Neither has moved.
+3. **Then the rest of asset loading.** `game.XEPACK` past its first 0x80000,
    plus whatever the unblocked loader threads ask for next. Expect the import
    count to move past 76 for the first time in a dozen runs.
-3. **Checkpoint here.** A game that boots, streams its assets and drives a
+4. **Checkpoint here.** A game that boots, streams its assets and drives a
    coherent command stream is the right foundation to start a renderer
    against, and it is a different thing from where this was.
-4. **Then the big one: the renderer.** Host backend, PM4 command translation,
+5. **Then the big one: the renderer.** Host backend, PM4 command translation,
    shader recompilation via XenosRecomp, vertex/texture formats, EDRAM and
    resolves. This is the majority of the remaining work by a wide margin.
-5. Input, then audio.
-6. Revisit the 33 known-bad switch sites; locate `setjmp`/`longjmp` if error
+6. Input, then audio.
+7. Revisit the 33 known-bad switch sites; locate `setjmp`/`longjmp` if error
    paths misbehave.
 
 ---

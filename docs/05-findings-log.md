@@ -2483,6 +2483,66 @@ unknown objects returning success. But threads 4105 and 4106 still exit
 immediately, so waiting on them correctly changes nothing. Wrong, fixed,
 not load-bearing.
 
+## The probe fired, and the deadlock broke
+
+```
+[probe] calling sub_82965488(0x00000080) to complete the async request
+[trace] request-complete sub_82965488 #1: handle 0x00000080
+[probe] returned; request object state is now 3
+```
+
+Then, without any further help from us, the guest drove it the rest of the way:
+
+| | before | after |
+|---|---|---|
+| request object [0] state | 1 | **4** (signalled → acknowledged) |
+| its handle at +0x64 | `0x00000080` | **`0x80000080`** — high bit set, slot **freed** |
+| ev4 (`0x00010030`) | NEVER SET BY ANYONE | **signalled** |
+| Game Master 4101 | `sub_829677D0+0x3B0`, WaitForMultipleObjects | **`sub_829677D0+0x133`**, WaitForSingleObject |
+| `KeDelayExecutionThread` | ~5,000,000 calls per 5 s | **~120 calls total** |
+| ev3 (`0x0001002C`) | 1 wait / 1 signal | 3 waits / 2 signals |
+
+The guest **recycling the request slot on its own** is the part that matters.
+That is the game agreeing the completion was legitimate, not us forcing a
+value past a check. A wrong call would have been rejected by one of the six
+validation steps, or would have left the object in a state nothing advances.
+Instead the state machine ran 1 → 3 → 4 and freed the handle.
+
+`sub_829677D0+0x133` is *earlier* in the function than `+0x3B0`, so the Game
+Master did not merely move — it went round its loop and is now waiting at the
+top for the next work item. And the five-million-per-second
+`KeDelayExecutionThread` spin, which had been written off as background noise
+because its call-site counter looked frozen, was the loader spinning on this
+exact request. It stopped the moment the request completed.
+
+So the diagnosis was right end to end, and the probe stays on — see below.
+
+### What is still not known
+
+Who makes this call on the console. `sub_82965488` has four call sites; the
+two that run (`sub_829660C0`, `sub_82966D90`) are on the submission side, and
+the two that would consume a completion (`sub_82965D58`, `sub_82966C58`) have
+never executed. Something that should reach them does not.
+
+The strongest candidate is one of the two threads that start and immediately
+return — entries `0x82A25CE8` (4105) and `0x829F4C80` (4106). A worker thread
+that runs its body once and exits is a thread whose loop condition was false
+on the first test, and an async-I/O worker sitting in a loop calling
+`sub_82965D58` is exactly the shape of the missing piece. Note also that
+`KeInitializeSemaphore` is an untouched generated stub and there is no
+semaphore object type at all — if that queue is a semaphore, the worker has
+nothing to wait on and nothing to wake for.
+
+### Why the probe is now on by default
+
+It is a stand-in for a mechanism we have not identified, not a fix, and it is
+labelled as such in the code and disabled by `WOS_NO_COMPLETE_IO`.
+
+Keeping the game deadlocked in the name of purity would buy nothing. The only
+way to find the next problem is to get past this one, and every measurement
+this project has made was only possible because the run got far enough to make
+it. It is removable in one line once the real mechanism turns up.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

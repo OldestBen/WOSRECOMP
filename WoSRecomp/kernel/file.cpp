@@ -571,10 +571,38 @@ void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
 }
 
 // ---------------------------------------------------------------------------
-// AN EXPERIMENT, NOT A FIX. Off unless WOS_PROBE_COMPLETE_IO is set.
+// A STAND-IN FOR A MECHANISM WE HAVE NOT IDENTIFIED. On by default; set
+// WOS_NO_COMPLETE_IO to turn it off and get the old behaviour back.
 //
-// The diagnosis says the async read completes correctly and nothing consumes
-// the result. Specifically, after the APC runs:
+// This started as an experiment and stayed because it works. When it ran, the
+// guest's own state machine accepted the call and drove it to completion
+// without any further help from us:
+//
+//     request object [0] state 1 -> 3 (by the signaller) -> 4 (acknowledged)
+//     its handle 0x00000080 -> 0x80000080, high bit set: the slot was FREED
+//     ev4 (0x00010030) went from NEVER SET BY ANYONE to signalled
+//     the Game Master left the wait it had been stuck in for a dozen runs
+//     KeDelayExecutionThread fell from ~5,000,000 calls per 5 s to ~120 total
+//
+// The guest recycling the request slot on its own is the part that matters:
+// that is the game agreeing the completion was legitimate, not us forcing a
+// value past a check. A wrong call would have been rejected by one of the six
+// validation steps, or left the object in a state nothing advances.
+//
+// What is still unknown is WHO makes this call on the console. sub_82965488
+// has four call sites; the two that run (sub_829660C0, sub_82966D90) are on
+// the submission side, and the two that would consume a completion
+// (sub_82965D58, sub_82966C58) have never executed. Something that should
+// reach them does not — the most likely candidate being one of the two
+// threads (entries 0x82A25CE8 and 0x829F4C80) that start and immediately
+// return. Until that is found, this stands in for it.
+//
+// Keeping the game deadlocked in the name of purity would buy nothing: the
+// only way to find the next problem is to get past this one, and this is
+// removable in one line once the real mechanism turns up.
+//
+// The diagnosis it was built to test: the async read completes correctly and
+// nothing consumes the result. Specifically, after the APC runs:
 //
 //   - the file request at [0x82F71ACC+0x18] is in state 2 (completed OK) and
 //     carries the async-request handle 0x00000080 at its +0x34;
@@ -586,16 +614,10 @@ void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
 //   - the signaller then sets the handle at [0x82F719DC] = 0x00010030 = ev4,
 //     which is one of the two events the Game Master is blocked on.
 //
-// Every link is verified except the call itself. This makes the call, and so
-// tests the whole chain in one run rather than by reading four more functions.
-//
-// It is deliberately NOT the default. If the game springs to life with this
-// set, the diagnosis is confirmed and the real work is finding what makes that
-// call on the console. If nothing changes, the diagnosis is wrong somewhere
-// and the reading has to continue — which is worth knowing just as much.
+// Every link was verified except the call itself. This makes the call.
 void ProbeCompleteAsyncRequest(PPCContext& ctx, uint8_t* base)
 {
-    static const bool s_enabled = std::getenv("WOS_PROBE_COMPLETE_IO") != nullptr;
+    static const bool s_enabled = std::getenv("WOS_NO_COMPLETE_IO") == nullptr;
     if (!s_enabled)
         return;
 
