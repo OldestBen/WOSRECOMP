@@ -45,6 +45,14 @@ struct ThreadObject : KernelObject
     std::condition_variable startCv;
     bool released = false;         // false while created-suspended
 
+    // A thread handle is a waitable object: waiting on it means "block until
+    // this thread exits", and it stays signalled forever afterwards. We had no
+    // way to express that, so such waits fell through to the unknown-object
+    // path in sync.cpp and returned success immediately — telling the caller a
+    // thread had exited while it was still starting up.
+    std::mutex exitMutex;
+    std::condition_variable exitCv;
+
     uint32_t entryPoint = 0;
     uint32_t startContext = 0;
     uint32_t stackBase = 0;
@@ -66,6 +74,31 @@ struct ThreadObject : KernelObject
             released = true;
         }
         startCv.notify_all();
+    }
+
+    // Publish exit under the mutex so a waiter that has already evaluated the
+    // predicate and not yet slept cannot miss the notify.
+    void MarkFinished()
+    {
+        {
+            std::lock_guard<std::mutex> lock(exitMutex);
+            finished = true;
+        }
+        exitCv.notify_all();
+    }
+
+    // true if the thread has exited, false on timeout. A negative timeout is
+    // INFINITE, matching the convention the wait imports use.
+    bool WaitForExit(int64_t timeoutMs)
+    {
+        std::unique_lock<std::mutex> lock(exitMutex);
+        if (timeoutMs < 0)
+        {
+            exitCv.wait(lock, [this] { return finished.load(); });
+            return true;
+        }
+        return exitCv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+            [this] { return finished.load(); });
     }
 };
 
@@ -143,7 +176,7 @@ void GuestThreadMain(uint8_t* base, std::shared_ptr<wos::ThreadObject> self)
     {
         printf("[thread] no recompiled function at guest 0x%08X — thread %u does nothing\n",
             self->entryPoint, self->threadId);
-        self->finished = true;
+        self->MarkFinished();
         return;
     }
 
@@ -173,7 +206,7 @@ void GuestThreadMain(uint8_t* base, std::shared_ptr<wos::ThreadObject> self)
     fn(ctx, base);
 
     --g_liveGuestThreads;
-    self->finished = true;
+    self->MarkFinished();
     printf("[thread] %u returned\n", self->threadId);
 }
 
@@ -477,3 +510,29 @@ PPC_FUNC(__imp__RtlDeleteCriticalSection)
     ctx.r3.u64 = wos::kStatusSuccess;
 }
 #endif
+
+// The seam declared in object.h. sync.cpp cannot see ThreadObject — it is
+// defined in this file — so the dynamic_cast has to happen on this side.
+//
+// This exists because a wait on a thread handle used to fall through to the
+// unknown-object path in NtWaitForSingleObjectEx, which returns success
+// immediately. That told the caller a thread had already exited while it was
+// still starting up, which is the same class of bug as every other "stub
+// returns success to a wait" this project has hit: it does not fail, it
+// silently inverts the timing the caller is relying on.
+namespace wos
+{
+
+int WaitForThreadExit(uint32_t handleOrPtr, int64_t timeoutMs)
+{
+    auto obj = ObjectFromAny(handleOrPtr);
+    auto* thread = dynamic_cast<ThreadObject*>(obj.get());
+    if (thread == nullptr)
+        return -1;
+
+    // Hold the shared_ptr for the duration: the wait can outlive whatever else
+    // referenced the handle, and the condition variable lives in the object.
+    return thread->WaitForExit(timeoutMs) ? 1 : 0;
+}
+
+} // namespace wos

@@ -127,6 +127,63 @@ PPC_FUNC(sub_82968498)
     __imp__sub_82968498(ctx, base);
 }
 
+// ---------------------------------------------------------------------------
+// The four functions that call sub_82965488.
+//
+// sub_82968498 was never supposed to reach sub_82965488 — reading it settled
+// that. It is a state setter: it moves the file request from state 1 to state
+// 2 and returns. sub_82965488 is the consumer on the other side of that
+// boundary, reached only from these four call sites:
+//
+//     82965D90  in sub_82965D58+0x38
+//     829661FC  in sub_829660C0+0x13C
+//     82966D60  in sub_82966C58+0x108
+//     82966F0C  in sub_82966D90+0x17C
+//
+// The request object is sitting in state 1, which is the state that signals
+// immediately. So the question is no longer "what does the completion do" but
+// "who is supposed to pump it, and why isn't that running". These four
+// tripwires answer whether any of them is reached at all — which decides
+// whether to walk up their callers or to look at why a thread that should be
+// calling them isn't alive.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+std::atomic<uint64_t> g_pump0{0};
+std::atomic<uint64_t> g_pump1{0};
+std::atomic<uint64_t> g_pump2{0};
+std::atomic<uint64_t> g_pump3{0};
+} // namespace
+
+PPC_FUNC_IMPL(__imp__sub_82965D58);
+PPC_FUNC(sub_82965D58)
+{
+    Trip("pump sub_82965D58", g_pump0, uint32_t(ctx.lr) - 4);
+    __imp__sub_82965D58(ctx, base);
+}
+
+PPC_FUNC_IMPL(__imp__sub_829660C0);
+PPC_FUNC(sub_829660C0)
+{
+    Trip("pump sub_829660C0", g_pump1, uint32_t(ctx.lr) - 4);
+    __imp__sub_829660C0(ctx, base);
+}
+
+PPC_FUNC_IMPL(__imp__sub_82966C58);
+PPC_FUNC(sub_82966C58)
+{
+    Trip("pump sub_82966C58", g_pump2, uint32_t(ctx.lr) - 4);
+    __imp__sub_82966C58(ctx, base);
+}
+
+PPC_FUNC_IMPL(__imp__sub_82966D90);
+PPC_FUNC(sub_82966D90)
+{
+    Trip("pump sub_82966D90", g_pump3, uint32_t(ctx.lr) - 4);
+    __imp__sub_82966D90(ctx, base);
+}
+
 PPC_FUNC_IMPL(__imp__sub_82965488);
 PPC_FUNC(sub_82965488)
 {

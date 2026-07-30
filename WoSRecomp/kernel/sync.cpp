@@ -492,10 +492,22 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
         return;
     }
 
+    // A thread handle is waitable: it means "block until this thread exits".
+    // This used to reach the unknown-object path below and return success
+    // immediately, which told the caller a thread had exited while it was
+    // still starting up.
+    if (const int r = wos::WaitForThreadExit(ctx.r3.u32, timeoutMs); r >= 0)
+    {
+        wos::RecordWaitSite(callSite, ctx.r3.u32, timeoutMs, r == 1);
+        ctx.r3.u64 = (r == 1) ? wos::kStatusSuccess : wos::kStatusTimeout;
+        return;
+    }
+
     // Unknown object: returning success rather than blocking forever keeps
     // bring-up moving. It is a lie, but a loud one — the object type is
     // printed so it shows up rather than hanging silently.
-    printf("[sync] wait on unknown object 0x%08X — returning success\n", ctx.r3.u32);
+    printf("[sync] wait on unknown object 0x%08X — returning success "
+           "(called from guest 0x%08X)\n", ctx.r3.u32, callSite - 4);
     ctx.r3.u64 = wos::kStatusSuccess;
 }
 #endif

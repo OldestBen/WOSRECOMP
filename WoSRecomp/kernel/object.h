@@ -71,4 +71,17 @@ void SignalEventIfAny(uint32_t handleOrPtr);
 // missing piece of the runtime precisely.
 void ReportWaitActivity();
 
+// Wait on a thread handle — "block until this thread exits", which is what
+// waiting on a thread object means and what we previously could not express.
+// ThreadObject is defined inside thread.cpp, so sync.cpp cannot dynamic_cast to
+// it; this is the seam instead.
+//
+// Returns:
+//    1  the handle named a thread and it has exited
+//    0  the handle named a thread and the wait timed out
+//   -1  the handle did not name a thread — the caller should keep looking
+//
+// timeoutMs < 0 is INFINITE, matching the wait imports.
+int WaitForThreadExit(uint32_t handleOrPtr, int64_t timeoutMs);
+
 } // namespace wos

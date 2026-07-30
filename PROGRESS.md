@@ -41,15 +41,15 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
   branches at `0x829654F8`/`0x82965504`, reached from a request-completion
   function at `0x82965488` with four callers, none of which has ever appeared
   on a stack. The request objects stay in state 1 instead of moving to 3.
-- **The break is now a single hop.** `game.XEPACK` is read once with a
-  completion APC. The APC is delivered on the issuing thread at the correct
-  point, the request block at `0x82F71ACC` is fully populated at delivery
-  (closing the ordering hypothesis for good), and the I/O completion
-  `sub_82968498` is entered exactly once with every argument correct —
-  `r3 = 0x82D468C8`, `r4 = 524288`, `r5 = 0`. `sub_82965488`, the function that
-  would signal, is never entered. Returning `STATUS_PENDING` for reads carrying
-  an APC is correct and stays, but it was not the fault. What remains is to
-  read `sub_82968498` and see which branch it takes instead.
+- **The async read works. Nobody consumes the result.** `game.XEPACK` is read,
+  the completion APC is delivered correctly, and `sub_82968498` marks the file
+  request complete — confirmed by `[req+0x20] = 0x80000`, the byte count it
+  writes only on the success path. `sub_82968498` is a state setter, not a
+  signaller; it was never meant to reach `sub_82965488`. The consumer that
+  would signal has four call sites and none has ever run. Request object [0] is
+  sitting in state 1, which is the state that signals immediately, and the
+  handle it would set — `[0x82F719DC] = 0x00010030` — is ev4, one of the exact
+  events the Game Master is blocked on. Everything is armed; nothing pumps it.
 - **Asset loading works as far as it gets:** `game_shared.ini`, `amalga.toc`
   and 774 KB of `SOUNDSRC_RVB.PCK` all load correctly.
 - **The ring size encoding is still unconfirmed.** The raw argument is 0xE; a
@@ -62,11 +62,11 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-1. **Read `sub_82968498`.** It runs once with correct arguments and does not
-   reach `sub_82965488`. This is the last unknown instruction range in a
-   deadlock that is otherwise mapped end to end. `xex_info --func 0x82968498`;
-   the `[state]` heartbeat block reports the request-object array alongside it,
-   so a never-allocated array would show up without reading anything.
+1. **Find who pumps `sub_82965488`.** Tripwires are in on all four of its
+   callers (`sub_82965D58`, `sub_829660C0`, `sub_82966C58`, `sub_82966D90`).
+   If one fires, the argument is wrong; if none fires, walk up their callers or
+   find the thread that should be running them. The request is armed and the
+   signal handle resolves to a blocked event, so this is the last link.
 2. **Then the rest of asset loading.** `game.XEPACK` past its first 0x80000,
    plus whatever the unblocked loader threads ask for next. Expect the import
    count to move past 76 for the first time in a dozen runs.

@@ -2278,6 +2278,123 @@ The single most informative thing it can report is a null or implausible
 completion runs and signals nothing" is fully explained without reading another
 instruction.
 
+## The completion was never the consumer — and the request is armed
+
+Reading `sub_82968498` corrected the framing entirely. It is 21 instructions:
+
+```
+82968498  lwz   r11,72(r3)      ; state = [req+0x48]
+8296849C  cmpwi cr6,r11,1
+829684A0  beq   cr6,0x829684C8  ; state 1 -> the completion path
+829684A4  cmpwi cr6,r11,3
+829684A8  beq   cr6,0x829684BC  ; state 3 -> [req+0x48] = 4, return
+829684AC  lis   r11,0x8220
+829684B4  addi  r3,r11,0x6D10   ; otherwise: assertion string
+829684B8  b     0x8290BB88      ; and panic
+829684C8  cmpwi cr6,r5,0        ; r5 = the I/O error
+829684CC  beq   cr6,0x829684DC
+829684D0  li    r11,5
+829684D4  stw   r11,72(r3)      ; error -> state 5
+829684D8  blr
+829684DC  li    r11,2
+829684E0  stw   r4,32(r3)       ; [req+0x20] = bytes transferred
+829684E4  stw   r11,72(r3)      ; success -> state 2
+829684E8  blr
+```
+
+**It is a state setter, not a signaller.** It never had a path to
+`sub_82965488` and was never supposed to. The two sit on opposite sides of a
+producer/consumer boundary: `sub_82968498` marks the file request complete,
+and something else is supposed to notice and signal. Three builds were spent
+looking for a link that does not exist.
+
+It also *worked*. The dump shows `[fileRequest+0x20] = 0x00080000` — 524288,
+exactly the byte count `stw r4,32(r3)` writes on the success path. The APC
+chain is correct end to end.
+
+`sub_82965488` then decoded cleanly, and every field it uses is now confirmed
+rather than guessed:
+
+```
+handle & 0x80000000 must be 0
+desc      = 0x82F719EC
+mask      = [desc+0x24]
+count     = [desc+0x20]
+slot      = handle & mask ;  slot >= count -> reject
+stride    = [desc+0x1C]
+entry     = [desc+0x00] + slot*stride
+stored    = [entry+0x08] ;  stored != handle -> reject
+index     = stored & mask
+obj       = [0x82F71A64] + index*112
+state     = [obj+0x34]
+state == 1        -> SIGNAL
+[obj+0x48] > 0    -> SIGNAL
+state 6 or 7      -> state = 4
+state 2 or 3      -> return silently
+```
+
+and the signaller sets `state = 3` then loads the handle from `[0x82F719DC]`
+and tail-calls the set wrapper at `0x82B16C48`.
+
+The runtime dump supplies the values:
+
+```
+[state] handle table: base 0x4023531C stride 112 count 64
+[state] signal handle [0x82F719DC] = 0x00010030
+[state] request-object array [0x82F71A64] = 0x402352C0
+[state]   [0] 0x402352C0  state 1
+```
+
+Two things follow, and both are decisive.
+
+**`[0x82F719DC] = 0x00010030` is ev4** — one of the exact five events the Game
+Master waits on and nothing ever sets. The signaller, if reached, would unblock
+it. The chain is confirmed all the way to the blocked thread.
+
+**Request object [0] is in state 1** — which is the first branch
+`sub_82965488` takes, straight to the signaller. The request is armed. It would
+signal on the next call.
+
+So the deadlock is not a missing state transition, a wrong argument, or an
+ordering problem. Everything the producer had to do has been done. **Nobody
+calls the consumer.** `sub_82965488` has four call sites —
+`sub_82965D58+0x38`, `sub_829660C0+0x13C`, `sub_82966C58+0x108`,
+`sub_82966D90+0x17C` — and none of them has ever appeared on a stack.
+
+## Waits on thread handles returned success immediately
+
+Found while reading the same log, and wrong independently of the above.
+
+```
+[thread] created 4105: entry 0x82A25CE8
+[thread] created 4106: entry 0x829F4C80
+[sync] wait on unknown object 0x00010068 — returning success
+[thread] 4106 returned
+[thread] 4105 returned
+[sync] wait on unknown object 0x00010064 — returning success
+```
+
+`0x00010064` and `0x00010068` are the next two handles after ev10
+(`0x00010060`), allocated where threads 4105 and 4106 were created — they are
+thread handles. Waiting on a thread handle means "block until this thread
+exits". `NtWaitForSingleObjectEx` had no case for it, so both fell through to
+the unknown-object path, which returns success immediately.
+
+That is the same failure this project has now hit four separate times: **a stub
+that returns success to a wait does not fail, it silently inverts the timing
+the caller depends on.** `ThreadObject` already had a `finished` flag with no
+way to wait on it; it now has an exit condition variable, published under the
+mutex so a waiter that has evaluated the predicate and not yet slept cannot
+miss the notify. `wos::WaitForThreadExit` is the seam, because `ThreadObject`
+is defined inside `thread.cpp` and `sync.cpp` cannot `dynamic_cast` to it.
+
+Whether this is *the* blocker is not yet known — both threads did exit shortly
+afterwards, so the lie may have been harmless here. It is fixed because it is
+wrong, not because it is proven load-bearing.
+
+The unknown-object message now also prints its guest call site, so the next
+one of these names its own caller instead of needing a separate run to find it.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
