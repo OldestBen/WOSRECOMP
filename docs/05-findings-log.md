@@ -2395,6 +2395,94 @@ wrong, not because it is proven load-bearing.
 The unknown-object message now also prints its guest call site, so the next
 one of these names its own caller instead of needing a separate run to find it.
 
+## Every link verified except the call itself
+
+The pump tripwires fired — two of the four, once each:
+
+```
+[trace] pump sub_82966D90 call #1 (from guest 0x829680E8)
+[trace] pump sub_829660C0 call #1 (from guest 0x8296772C)
+```
+
+Both ran *before* the `game.XEPACK` read, and neither reached its `bl` to
+`sub_82965488` (no `[trace] request-complete` line). `sub_82965D58` and
+`sub_82966C58` never ran at all. So the two that do run are on the submission
+side, and the consumer side never executes.
+
+The state dump then supplied the last unknown value:
+
+```
+[state] handle table: base 0x4023531C stride 112 count 64 mask 0x0000007F
+[state] signal handle [0x82F719DC] = 0x00010030
+[state] request-object array [0x82F71A64] = 0x402352C0
+[state]   [0] 0x402352C0      1  0x00000080            0  READY TO SIGNAL
+[state]   [1] 0x40235330      0  0x80000001            0  idle
+[state] file request [0x82F71ACC+0x18] = 0x82D468C8
+[state]   [+0x48] = 2  (COMPLETED OK)
+[state]   [+0x20] = 0x00080000
+```
+
+Three things fall out.
+
+**The request handle is 0x00000080.** Object [0] carries it at +0x64; every
+other slot holds `0x8000000N`, high bit set, which `sub_82965488` rejects on
+its first instruction — those are free-slot markers. Slot 0 is the only live
+one, and it is the one the read used.
+
+**That handle passes every validation step**, checked by hand against the live
+values rather than assumed:
+
+| step | computation | result |
+|---|---|---|
+| `handle & 0x80000000` | `0x80 & 0x80000000` | 0 — accepted |
+| `slot = handle & mask` | `0x80 & 0x7F` | 0 |
+| `slot < count` | `0 < 64` | accepted |
+| `entry = base + slot*stride` | `0x4023531C + 0` | `0x4023531C` |
+| `stored = [entry+8]` | `[0x40235324]` = obj[0]+0x64 | `0x00000080` — matches |
+| `index = stored & mask` | `0x80 & 0x7F` | 0 |
+| `obj = array + index*112` | `0x402352C0` | object [0] |
+| `state = [obj+0x34]` | | **1 → SIGNAL** |
+
+**And the file request carries that handle.** `[0x82D468C8 + 0x34] =
+0x00000080`. The producer wrote down exactly what the consumer needs.
+
+`[fileRequest+0x48] = 2` confirms `sub_82968498` took its success path, and
+the request block's `[+0x10]` has gone from `0x00010024` to `0`, which is
+`0x829688C0`'s closing `stw r11,16(r31)`. The whole producer side ran to
+completion and left correct data behind.
+
+So: `sub_82965488(0x00000080)` would set request object [0] to state 3 and
+signal `[0x82F719DC]` = `0x00010030` = **ev4**, one of the two events the Game
+Master is blocked on. Every link in the chain is verified. The only thing that
+does not happen is the call.
+
+### A probe rather than four more disassemblies
+
+`kernel/file.cpp` gains `ProbeCompleteAsyncRequest`, gated on
+`WOS_PROBE_COMPLETE_IO` and off by default. After the completion APC runs it
+reads `[fileRequest+0x34]` and calls `sub_82965488` with it.
+
+This is an experiment, not a fix, and it is env-gated so the default build
+stays honest. Its value is that either outcome is conclusive: if the game
+moves, the whole diagnosis above is confirmed in one run and the remaining
+work is finding what makes that call on the console; if nothing changes, the
+diagnosis is wrong somewhere and the reading continues — which is worth
+knowing just as much.
+
+It refuses to call with a handle whose high bit is set, because
+`sub_82965488` discards those on its first instruction and a silent rejection
+would look exactly like the probe having no effect. That distinction has to
+stay visible; conflating "did nothing" with "was refused" is how three earlier
+rounds went sideways.
+
+### Thread-handle waits: fixed, and not the blocker
+
+The fix landed and works — `0x00010064` and `0x00010068` now appear in the
+wait-site census as real INFINITE waits that completed, rather than as
+unknown objects returning success. But threads 4105 and 4106 still exit
+immediately, so waiting on them correctly changes nothing. Wrong, fixed,
+not load-bearing.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

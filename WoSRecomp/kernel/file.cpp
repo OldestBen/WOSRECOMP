@@ -570,6 +570,78 @@ void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
     t_apcQueue.push_back({ routine, context, iosb });
 }
 
+// ---------------------------------------------------------------------------
+// AN EXPERIMENT, NOT A FIX. Off unless WOS_PROBE_COMPLETE_IO is set.
+//
+// The diagnosis says the async read completes correctly and nothing consumes
+// the result. Specifically, after the APC runs:
+//
+//   - the file request at [0x82F71ACC+0x18] is in state 2 (completed OK) and
+//     carries the async-request handle 0x00000080 at its +0x34;
+//   - request object [0] is in state 1, which is the first branch
+//     sub_82965488 takes, straight to the signaller;
+//   - that handle passes every validation step in sub_82965488 — checked by
+//     hand against the live values: 0x80 & 0x7F = slot 0, 0 < count 64,
+//     [table + 0*112 + 8] = 0x80 which matches, index 0, object 0x402352C0;
+//   - the signaller then sets the handle at [0x82F719DC] = 0x00010030 = ev4,
+//     which is one of the two events the Game Master is blocked on.
+//
+// Every link is verified except the call itself. This makes the call, and so
+// tests the whole chain in one run rather than by reading four more functions.
+//
+// It is deliberately NOT the default. If the game springs to life with this
+// set, the diagnosis is confirmed and the real work is finding what makes that
+// call on the console. If nothing changes, the diagnosis is wrong somewhere
+// and the reading has to continue — which is worth knowing just as much.
+void ProbeCompleteAsyncRequest(PPCContext& ctx, uint8_t* base)
+{
+    static const bool s_enabled = std::getenv("WOS_PROBE_COMPLETE_IO") != nullptr;
+    if (!s_enabled)
+        return;
+
+    constexpr uint32_t kRequestBlock = 0x82F71ACC;
+    constexpr uint32_t kComplete     = 0x82965488;
+
+    const uint32_t fileRequest = LoadU32(base, kRequestBlock + 0x18);
+    if (fileRequest < 0x82000000u || fileRequest >= 0x83000000u)
+    {
+        printf("[probe] file request 0x%08X is not an image address — skipped\n",
+            fileRequest);
+        return;
+    }
+
+    // The handle the file request carries, at the offset the live dump found
+    // it at. The high bit marks a free slot, and sub_82965488 rejects those
+    // outright, so refuse rather than call it with something it will discard
+    // silently — a silent rejection would look exactly like the probe having
+    // no effect, which is the one outcome that must stay distinguishable.
+    const uint32_t handle = LoadU32(base, fileRequest + 0x34);
+    if (handle == 0 || (handle & 0x80000000u) != 0)
+    {
+        printf("[probe] request handle [0x%08X+0x34] = 0x%08X is not a live "
+               "handle — not calling\n", fileRequest, handle);
+        return;
+    }
+
+    PPCFunc* complete = PPC_LOOKUP_FUNC(base, kComplete);
+    if (complete == nullptr)
+    {
+        printf("[probe] no recompiled function at 0x%08X\n", kComplete);
+        return;
+    }
+
+    printf("[probe] calling sub_%08X(0x%08X) to complete the async request\n",
+        kComplete, handle);
+
+    const PPCContext saved = ctx;
+    ctx.r3.u64 = handle;
+    complete(ctx, base);
+    ctx = saved;
+
+    printf("[probe] returned; request object state is now %u\n",
+        LoadU32(base, LoadU32(base, 0x82F71A64) + 0x34));
+}
+
 void DeliverPendingApcs(PPCContext& ctx, uint8_t* base)
 {
     if (t_apcQueue.empty())
@@ -610,6 +682,8 @@ void DeliverPendingApcs(PPCContext& ctx, uint8_t* base)
         ctx.r5.u64 = 0;
         routine(ctx, base);
         ctx = saved;
+
+        ProbeCompleteAsyncRequest(ctx, base);
     }
 }
 
