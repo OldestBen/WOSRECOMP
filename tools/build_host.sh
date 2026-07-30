@@ -128,8 +128,18 @@ echo "=========================================================="
 echo " Build failed. Extracting undefined symbols..."
 echo "=========================================================="
 
-grep -oE "undefined symbol: [A-Za-z_][A-Za-z0-9_]*|undefined reference to \`[A-Za-z_][A-Za-z0-9_]*'" "$BUILD_LOG" \
+# The name pattern used to be [A-Za-z_][A-Za-z0-9_]*, which is right for a C
+# import (__imp__XamFoo) and wrong for everything else. lld-link demangles C++,
+# so a missing kernel function comes out as
+#
+#   undefined symbol: void __cdecl wos::ReportLoaderState(unsigned char *)
+#
+# and the old pattern reported that as the symbol "void" — which named nothing,
+# pointed nowhere, and made a one-line CMakeLists omission look like a mystery.
+# Take the rest of the line instead; it is always exactly the symbol.
+grep -oE "undefined symbol: .*|undefined reference to \`[^']*'" "$BUILD_LOG" \
     | sed -E "s/^undefined symbol: //; s/^undefined reference to \`//; s/'$//" \
+    | sed -E 's/[[:space:]]+$//' \
     | sort -u > "$BUILD_LOG.syms"
 
 COUNT="$(wc -l < "$BUILD_LOG.syms" | tr -d ' ')"
@@ -145,8 +155,16 @@ else
     sed 's/^/    /' "$BUILD_LOG.syms"
     echo
     echo "Saved to: ${BUILD_LOG}.syms"
-    echo "Each is a guest import the game calls. Implementing them is what"
-    echo "WoSRecomp/kernel/ and WoSRecomp/os/ are for."
+    echo
+    if grep -q "wos::" "$BUILD_LOG.syms"; then
+        echo "NOTE: at least one of these is in namespace wos, so it is OUR code,"
+        echo "not a guest import. The usual cause is a new .cpp under kernel/ that"
+        echo "was never added to WOS_SOURCES in WoSRecomp/CMakeLists.txt — that"
+        echo "list is explicit, not a GLOB."
+    else
+        echo "Each is a guest import the game calls. Implementing them is what"
+        echo "WoSRecomp/kernel/ and WoSRecomp/os/ are for."
+    fi
 fi
 
 exit "$RC"
