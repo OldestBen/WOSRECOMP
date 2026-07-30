@@ -2203,6 +2203,81 @@ meant to fix.
 Both tripwire addresses are proven `bl` targets, so neither should fail to
 link; if one does, deleting it is safe and nothing depends on the file.
 
+## The answer: the completion runs, and stops one hop short
+
+The four measurements came back and one of the three outcomes happened cleanly.
+
+```
+[file] request block at queue:    [+0x10]=0x00010024 [+0x14]=0x00010024 [+0x18]=0x82D468C8
+[file] read 524288 of 0x80000 bytes from "D:\packs\game.XEPACK" into guest 0x40134000
+[file] delivering queued APC 0x82B16659 -> 0x82B16658, context 0x829688C0
+[file] request block at delivery: [+0x10]=0x00010024 [+0x14]=0x00010024 [+0x18]=0x82D468C8
+[trace] io completion sub_82968498 #1: handle 0x82D468C8, bytes 524288, error 0x00000000
+```
+
+and no `[trace] request-complete` line appears anywhere in the log.
+
+What that settles:
+
+- **The ordering hypothesis is closed.** The request block is fully populated
+  at delivery, identically to how it looked at queue time. The APC is not
+  arriving before the request exists, and it is not arriving after something
+  has torn it down. This was the last remaining reason to keep moving *when*
+  the APC runs, and it is now ruled out — three builds' worth of work on
+  delivery timing is finished.
+- **The APC chain reaches the I/O completion.** `sub_82968498` is entered once,
+  with `r3 = 0x82D468C8` (which is exactly `[request+0x18]`, so 0x829688C0's
+  `lwz r3,24(r31)` did what the disassembly said), `r4 = 524288` (the real byte
+  count) and `r5 = 0` (success). Every argument is right.
+- **`sub_82965488` is never entered.** The break is now bounded to a single
+  hop: something inside or below `sub_82968498` decides not to complete the
+  request.
+- **`STATUS_PENDING` changed nothing.** ev2/ev4/ev7/ev8/ev9 are still
+  `NEVER SET BY ANYONE`, imports are still stuck at 76, `game.XEPACK` is still
+  read exactly once. Returning 0x103 for a read carrying an APC is correct
+  kernel behaviour and stays, but it was not the fault.
+
+One detail worth carrying forward: `0x82D468C8` is an address in `.data`, not a
+small numeric handle. `sub_82965488` validates its argument against a handle
+table (`rlwinm r11,r3,0,0,1` on the high bits, `and r10,r8,r3` against a mask,
+`cmplw r10,r9` against a count) rather than dereferencing it. So if
+`sub_82968498` passes `0x82D468C8` straight through, validation fails and the
+function returns before reaching the signaller — but that is a hypothesis about
+code nobody has read yet, and it is being checked by reading it, not by
+patching around it.
+
+Also of note: `[request+0x14] = 0x00010024`, which is ev2 — the Game Master's
+own `handles[0]`. The request block names the event the completion is supposed
+to signal. Whereas the signaller at 0x82965534 loads its handle from
+`[0x82F719DC]` instead. Whether those are the same handle by construction is
+not yet known and is one of the things the next dump answers.
+
+### Two new instruments
+
+**`xex_info --func <addr>`** — disassemble the whole function *containing* an
+address. Every address that arrives from `--xrefs` or from a runtime `ctx.lr`
+is an interior address, and `--disasm` starting there hides the prologue,
+including the `mr rN,r3` that says where the argument went. That has cost a
+round trip more than once. `--xrefs` now also annotates each branch with its
+containing function for the same reason: "0x82965D90 calls it" is unactionable
+until you know which function 0x82965D90 sits inside.
+
+**`kernel/state_probe.cpp`** — a raw dump of the loader's globals at heartbeat
+time: the request block, the handle table at 0x82F719EC, the request-object
+array at `[0x82F71A64]`, and the object `sub_82968498` was handed. Every
+diagnostic so far reports what the *host* did; none report what the *guest*
+thinks the state of the world is, and that is where the remaining answer lives.
+It prints raw words rather than named fields, because the layout is only partly
+confirmed and naming an unconfirmed field is how several earlier wrong turns
+started. It samples twice, spaced apart, so "wrong from the start" and "changed
+once and stuck" stay distinguishable.
+
+The single most informative thing it can report is a null or implausible
+`[0x82F71A64]`: if the request-object array was never allocated, then
+`sub_82965488` could not find an object even if it were called, and "the
+completion runs and signals nothing" is fully explained without reading another
+instruction.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

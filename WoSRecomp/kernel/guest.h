@@ -104,6 +104,12 @@ void DeliverPendingApcs(PPCContext& ctx, uint8_t* base);
 void StartD3DProbe(uint8_t* base);
 void ReportD3DProbe(uint8_t* base);
 
+// Dump the loader's own globals — the request block, the handle table and the
+// request-object array the I/O completion walks. Implemented in
+// kernel/state_probe.cpp; see the comment there for where each address came
+// from. Called from the heartbeat, and prints on only two of its calls.
+void ReportLoaderState(uint8_t* base);
+
 // Serialises diagnostic output.
 //
 // The all-thread stack dumper and the blocked-wait reporter run on different

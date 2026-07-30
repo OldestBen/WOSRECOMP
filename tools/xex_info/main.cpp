@@ -1104,6 +1104,19 @@ static int xrefs(const Image& image, uint32_t addr)
 
     size_t branches = 0, pointers = 0;
 
+    // A call site's address is not the thing you want to look up next — the
+    // *containing* function is. Reporting only the site has repeatedly cost a
+    // round trip: "0x82965D90 calls it" is unactionable until you know that
+    // 0x82965D90 sits inside some larger function you then have to find by
+    // bisecting --disasm. .pdata already knows, so say it here.
+    const std::vector<PdataFunc> pdata = readPdata(image);
+    auto functionOf = [&](uint32_t a) -> uint32_t {
+        for (const auto& f : pdata)
+            if (a >= f.begin && a < f.end)
+                return f.begin;
+        return 0;
+    };
+
     printf("--- direct branches ---\n");
     for (const auto& s : image.sections)
     {
@@ -1121,8 +1134,13 @@ static int xrefs(const Image& image, uint32_t addr)
 
             ppc_insn decoded{};
             ppc::Disassemble(s.data + off, site, decoded);
-            printf("  %08X  %-10s %s\n", site,
+            printf("  %08X  %-10s %-24s", site,
                 decoded.opcode ? decoded.opcode->name : "?", decoded.op_str);
+            if (const uint32_t fn = functionOf(site); fn != 0)
+                printf("  in sub_%08X+0x%X", fn, site - fn);
+            else
+                printf("  (no .pdata record)");
+            printf("\n");
             ++branches;
         }
     }
@@ -1161,6 +1179,36 @@ static int xrefs(const Image& image, uint32_t addr)
 
     printf("\n%zu branch(es), %zu stored pointer(s).\n", branches, pointers);
     return EXIT_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// --func: disassemble the whole function *containing* an address.
+//
+// --disasm starts exactly where you point it, which is right when you already
+// know a function boundary and wrong the rest of the time. Every address that
+// arrives from --xrefs or from a runtime `ctx.lr` is an interior address, and
+// starting a dump there hides the prologue — including the `mr rN,r3` that
+// says which register the argument ended up in, which is usually the first
+// thing you need. .pdata knows the enclosing region, so resolve it first.
+// ---------------------------------------------------------------------------
+static int disasmContaining(const Image& image, uint32_t addr)
+{
+    const std::vector<PdataFunc> pdata = readPdata(image);
+    for (const auto& f : pdata)
+    {
+        if (addr >= f.begin && addr < f.end)
+        {
+            if (f.begin != addr)
+                printf("0x%08X is inside sub_%08X (0x%08X..0x%08X), at +0x%X.\n\n",
+                    addr, f.begin, f.begin, f.end, addr - f.begin);
+            return disasm(image, f.begin, 0);
+        }
+    }
+
+    printf("No .pdata record covers 0x%08X — disassembling from there directly.\n"
+           "(Leaf functions without unwind data do not appear in .pdata, so this\n"
+           "is expected for small helpers.)\n\n", addr);
+    return disasm(image, addr, 0);
 }
 
 // Parse a hex-or-decimal address from the command line. Returns false rather
@@ -1202,8 +1250,13 @@ int main(int argc, char** argv)
         printf("                   --context N prints the N instructions before\n");
         printf("                   each hit, which is the only way to see what\n");
         printf("                   value a store actually writes\n");
+        printf("  --func <addr>    disassemble the whole function CONTAINING an\n");
+        printf("                   address. Use this for anything that came out of\n");
+        printf("                   --xrefs or a runtime return address, which are\n");
+        printf("                   interior addresses, not function starts\n");
         printf("  --xrefs <addr>   list every branch to, and stored pointer to, an\n");
-        printf("                   address — i.e. who calls or references it\n");
+        printf("                   address — i.e. who calls or references it. Each\n");
+        printf("                   branch is annotated with its containing function\n");
         return EXIT_SUCCESS;
     }
 
@@ -1214,10 +1267,23 @@ int main(int argc, char** argv)
     const char* writeConfig = nullptr;
     bool wantDisasm = false, wantXrefs = false;
     bool wantField = false, fieldStoresOnly = false;
+    bool wantFunc = false;
     uint32_t disasmAddr = 0, disasmCount = 0, xrefsAddr = 0, fieldDisp = 0;
+    uint32_t funcAddr = 0;
     uint32_t fieldContext = 0;
     for (int i = 2; i < argc; ++i)
     {
+        if (std::strcmp(argv[i], "--func") == 0)
+        {
+            if (i + 1 >= argc || !parseAddr(argv[i + 1], funcAddr))
+            {
+                fprintf(stderr, "--func requires an address, e.g. --func 0x82965D90\n");
+                return EXIT_FAILURE;
+            }
+            ++i;
+            wantFunc = true;
+            continue;
+        }
         if (std::strcmp(argv[i], "--disasm") == 0)
         {
             if (i + 1 >= argc || !parseAddr(argv[i + 1], disasmAddr))
@@ -1381,6 +1447,9 @@ int main(int argc, char** argv)
         fprintf(stderr, "Failed to parse \"%s\": %s\n", argv[1], e.what());
         return EXIT_FAILURE;
     }
+
+    if (wantFunc)
+        return disasmContaining(image, funcAddr);
 
     if (wantDisasm)
         return disasm(image, disasmAddr, disasmCount);
