@@ -41,11 +41,15 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
   branches at `0x829654F8`/`0x82965504`, reached from a request-completion
   function at `0x82965488` with four callers, none of which has ever appeared
   on a stack. The request objects stay in state 1 instead of moving to 3.
-- **The asynchronous read is understood and is not the fix.** `game.XEPACK` is
-  read once with a completion APC that we were dropping. It is now delivered,
-  on the issuing thread, at the correct point (queued, drained at the next
-  wait). It changes nothing. Next measurement is a tripwire on the real
-  completion, `sub_82968498`.
+- **The break is now a single hop.** `game.XEPACK` is read once with a
+  completion APC. The APC is delivered on the issuing thread at the correct
+  point, the request block at `0x82F71ACC` is fully populated at delivery
+  (closing the ordering hypothesis for good), and the I/O completion
+  `sub_82968498` is entered exactly once with every argument correct —
+  `r3 = 0x82D468C8`, `r4 = 524288`, `r5 = 0`. `sub_82965488`, the function that
+  would signal, is never entered. Returning `STATUS_PENDING` for reads carrying
+  an APC is correct and stays, but it was not the fault. What remains is to
+  read `sub_82968498` and see which branch it takes instead.
 - **Asset loading works as far as it gets:** `game_shared.ini`, `amalga.toc`
   and 774 KB of `SOUNDSRC_RVB.PCK` all load correctly.
 - **The ring size encoding is still unconfirmed.** The raw argument is 0xE; a
@@ -58,9 +62,11 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-1. **Tripwire `sub_82968498`** — the I/O completion the APC chain leads to.
-   Establish whether it runs, and what it does with the request object. This
-   is the one remaining unknown in a fully-mapped deadlock.
+1. **Read `sub_82968498`.** It runs once with correct arguments and does not
+   reach `sub_82965488`. This is the last unknown instruction range in a
+   deadlock that is otherwise mapped end to end. `xex_info --func 0x82968498`;
+   the `[state]` heartbeat block reports the request-object array alongside it,
+   so a never-allocated array would show up without reading anything.
 2. **Then the rest of asset loading.** `game.XEPACK` past its first 0x80000,
    plus whatever the unblocked loader threads ask for next. Expect the import
    count to move past 76 for the first time in a dozen runs.
