@@ -673,10 +673,10 @@ void ProbeCompleteAsyncRequest(PPCContext& ctx, uint8_t* base)
         LoadU32(base, LoadU32(base, 0x82F71A64) + 0x34));
 }
 
-void DeliverPendingApcs(PPCContext& ctx, uint8_t* base)
+bool DeliverPendingApcs(PPCContext& ctx, uint8_t* base)
 {
     if (t_apcQueue.empty())
-        return;
+        return false;
 
     // Move first: a completion routine may issue another read and queue a
     // further APC, and appending to the vector being iterated would be a
@@ -716,6 +716,8 @@ void DeliverPendingApcs(PPCContext& ctx, uint8_t* base)
 
         ProbeCompleteAsyncRequest(ctx, base);
     }
+
+    return true;
 }
 
 } // namespace wos

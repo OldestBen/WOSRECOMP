@@ -16,6 +16,7 @@
 #include "guest.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <mutex>
@@ -276,7 +277,20 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
     // four Nt/Ke wait imports and not here, which meant a thread that polls by
     // sleeping rather than by waiting on an object never reached a delivery
     // point at all. That is exactly the shape of the loop at guest 0x82B1A680.
-    if (ctx.r4.u32 != 0)
+    // And when one runs, an alertable delay ends early with STATUS_USER_APC
+    // rather than sleeping out its interval — same rule as the object waits in
+    // sync.cpp, and for the same reason: the caller asked to be interrupted.
+    if (ctx.r4.u32 != 0 && wos::DeliverPendingApcs(ctx, base))
+    {
+        static std::atomic<uint64_t> s_count{0};
+        if (const uint64_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1; n <= 8)
+            printf("[sync] KeDelayExecutionThread: APC delivered -> STATUS_USER_APC "
+                   "(#%llu, guest 0x%08X)\n",
+                (unsigned long long)n, uint32_t(ctx.lr) - 4);
+        ctx.r3.u64 = wos::kStatusUserApc;
+        return;
+    }
+    if (ctx.r4.u32 == 0)
         wos::DeliverPendingApcs(ctx, base);
 
     // Attributed by call site because implementing it properly did not end the

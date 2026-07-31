@@ -93,6 +93,7 @@ inline bool EnvIsSet(const char* name)
 constexpr uint32_t kStatusSuccess           = 0x00000000u;
 constexpr uint32_t kStatusTimeout           = 0x00000102u;
 constexpr uint32_t kStatusPending           = 0x00000103u;
+constexpr uint32_t kStatusUserApc           = 0x000000C0u;
 constexpr uint32_t kStatusNoMemory          = 0xC0000017u;
 constexpr uint32_t kStatusInvalidParameter  = 0xC000000Du;
 constexpr uint32_t kStatusInvalidHandle     = 0xC0000008u;
@@ -122,7 +123,11 @@ uint32_t PhysicalBlockEnd(uint32_t addr);
 // kernel/file.cpp. QueueThreadApc records one; DeliverPendingApcs runs whatever
 // the calling thread has pending and is called at the top of every wait.
 void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb);
-void DeliverPendingApcs(PPCContext& ctx, uint8_t* base);
+
+// Runs whatever the calling thread has pending. Returns true if it delivered
+// anything, which an ALERTABLE wait must turn into STATUS_USER_APC rather than
+// going on to block — see the comment at the call sites in sync.cpp.
+bool DeliverPendingApcs(PPCContext& ctx, uint8_t* base);
 
 // Watch the D3D device fields that gate the frame loop. Implemented in
 // kernel/d3d_probe.cpp — see the comment there for which fields and why.

@@ -2654,6 +2654,52 @@ reached a delivery point at all — which is exactly the shape of the loop at
 Neither of these was found by looking for them. Both fell out of asking what
 `0xFFFFFFFF` actually meant instead of assuming it was a duration.
 
+## The missing half of APC semantics
+
+Running with `WOS_NO_COMPLETE_IO=1` settled it: neither `KeDelayExecutionThread`
+fix supplies the mechanism. Object [0] stays in state 1, the events stay unset,
+the deadlock is unchanged.
+
+The fixes were still worth having, and the run measured them:
+
+- the absolute-deadline fix cut that call site from **15,237,000 calls in five
+  seconds to 2,023,024** — a 7.5x reduction from honouring a deadline the old
+  code threw away.
+
+And it corrected something else I had wrong. The spin is **bounded**. It runs
+for roughly one heartbeat window and then stops of its own accord, in every run,
+with or without the stand-in — after which the thread blocks on the events. So
+it is a retry loop that gives up, not the completion driver. Calling it "the
+loader polling for this exact completion" was over-claiming from a correlation:
+it stops when the request completes *and* it stops when the request does not.
+
+Which leaves the actual mechanism, and re-reading our own APC handling found it.
+
+**An alertable wait has two ways to end: the object signals, or an APC is
+delivered.** In the second case the wait does not go on to block — it returns
+`STATUS_USER_APC` (0xC0) so the caller can look at whatever the APC changed and
+decide what to do. That is the entire point of alertability; a caller that did
+not want interrupting would pass `Alertable = FALSE`.
+
+We delivered the APC at the top of each wait and then **blocked anyway**, which
+silently deletes the notification. The observed behaviour matches exactly: the
+loader issues the read, the APC runs and moves the file request to state 2, and
+the loader — never told anything happened — carries on waiting on events that
+only the completion it was supposed to run would have signalled.
+
+This is the same shape as every other bug in this log, one layer up. The earlier
+ones were *stubs that returned success to a wait*, inverting its timing. This is
+a wait that **returns the wrong reason for waking**, which deletes the caller's
+opportunity to react. Both are failures to model what a wait means, and neither
+produces an error anywhere.
+
+`AlertableReturn` in sync.cpp now does the delivery and the status together, at
+all four wait imports plus `KeDelayExecutionThread`, keyed on each one's real
+Alertable register (`r5`, `r6`, `r8`, `r7`, `r4` respectively). It logs the
+first eight, because if it fires and nothing improves, the next question is
+whether the guest's wrapper handles 0xC0 at all — and that is only answerable if
+we know it was returned.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
