@@ -2827,6 +2827,49 @@ One correction to record: the host stack frames like `sub_82A7CD00 +0x1D0` are
 offsets. `+0x1D0` is past the end of the 47-instruction guest function, so
 reading those as guest addresses would be nonsense.
 
+## A diagnostic that is collected and filtered out is worse than none
+
+The `[alertable]` census was added specifically to settle whether the game ever
+performs an alertable wait. It was printed correctly at every heartbeat. It
+never appeared in a single digest, because `run_game.sh`'s default filter did
+not list the prefix — and neither did `[callsites]`, which holds the argument
+to the hot `KeDelayExecutionThread` site.
+
+So a whole round produced no answer to the question it was run for, and the
+absence read as evidence rather than as a hole. That is the same failure mode
+recorded three times earlier in this log — a capped printf, a function-scope
+`static bool`, a report inside the wrong branch — in a new place: **the
+instrument was fine and the pipe to me was lossy.**
+
+The filter now matches every prefix the runtime emits, excluding only the
+per-event `[waits]` census, which is a dozen lines every five seconds. The rule
+is inverted from before: include by default, exclude what is provably noisy.
+
+## The sleep fix did not reduce the spin, and I do not know why yet
+
+Negating `INT64_MIN` in unsigned arithmetic and capping at an hour is correct
+and stays. It did not do what I predicted: the call count at
+`bl@0x82B1A680` went from 5.7M in five seconds to **40.9M**.
+
+Across four builds that site has read 15.2M, 2.0M, 5.7M and 40.9M. A number
+that wanders by a factor of twenty while the code around it changes is not
+measuring what I assumed it measures, and the one explanation I offered — an
+infinite sleep collapsing to a no-op — predicted the count would fall to
+roughly zero. It did the opposite.
+
+The most likely reading now is that the dominant caller passes a *small or
+zero* interval rather than INFINITE, i.e. a deliberate `Sleep(0)` spin-wait in
+the game, whose rate depends on host scheduling rather than on our arithmetic.
+The `mulli r11,r11,-10000` at 0x82B1A654 turns `Sleep(0)` into an interval of
+exactly 0, which is neither negative nor a meaningful deadline — and our code
+routes 0 down the absolute branch and yields.
+
+But that is a hypothesis, and the census records only the *last* argument,
+which is useless for a site called forty million times with a mix of values.
+`KeDelayExecutionThread` now prints the first eight *distinct* intervals it
+sees, with the Alertable flag and the guest call site. That replaces the
+guess with the values.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

@@ -302,6 +302,30 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
     }
 
     const int64_t interval = static_cast<int64_t>(wos::LoadU64(base, intervalPtr));
+
+    // The raw argument, for the first few calls per distinct value.
+    //
+    // The call-site census records only the LAST argument, which is useless for
+    // a site called forty million times with a mix of values — and the count at
+    // that site has now wandered across 15.2M, 2.0M, 5.7M and 40.9M over four
+    // builds without a clear reason. Guessing which branch dominates has
+    // already produced one wrong explanation; this prints the values instead.
+    {
+        static std::mutex s_seenMutex;
+        static std::vector<int64_t> s_seen;
+        std::lock_guard<std::mutex> lock(s_seenMutex);
+        if (s_seen.size() < 8 &&
+            std::find(s_seen.begin(), s_seen.end(), interval) == s_seen.end())
+        {
+            s_seen.push_back(interval);
+            const char* kind = interval < 0 ? "relative" : "absolute/zero";
+            printf("[delay] interval %lld (0x%016llX) %s, Alertable=%u, "
+                   "from guest 0x%08X\n",
+                (long long)interval, (unsigned long long)interval, kind,
+                ctx.r4.u32, callSite - 4);
+        }
+    }
+
     if (interval < 0)
     {
         // Relative, in 100 ns units. Negate in UNSIGNED arithmetic.

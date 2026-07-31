@@ -30,11 +30,18 @@ EXE="$REPO_ROOT/WoSRecomp/build/WoSRecomp.exe"
 SECONDS_TO_RUN="${1:-45}"
 FILTER="${2:-}"
 
-# The default filter is everything that has ever answered a question here:
-# our own diagnostics, plus the file/thread/import lines that show progress.
-# Deliberately NOT the per-heartbeat event census — that repeats every 5 s and
-# drowns the rest.
-DEFAULT_FILTER='^\[state\]|^\[probe\]|^\[trace\]|^\[file\]|^\[thread\]|^\[import|^\[sync\]|^\[watchdog\]|^\[heartbeat\]'
+# The default filter is everything that has ever answered a question here.
+#
+# Get this wrong and a whole round is wasted: the [alertable] census was added
+# specifically to settle a question, printed correctly every heartbeat, and then
+# dropped on the floor because this pattern did not list it. A diagnostic that
+# is collected and filtered out is worse than one that was never written, since
+# its absence reads as evidence.
+#
+# So the rule is now: match every prefix the runtime emits, and exclude only
+# what is genuinely too noisy — the per-event [waits] census, which repeats a
+# dozen lines every five seconds. Everything else stays.
+DEFAULT_FILTER='^\[state\]|^\[probe\]|^\[trace\]|^\[file\]|^\[thread\]|^\[import|^\[sync\]|^\[watchdog\]|^\[heartbeat\]|^\[alertable\]|^\[delay\]|^\[callsites\]|^\[waitsites\]|^\[apc\]|^\[d3d\]|^\[gpu\]|^\[phys\]|^\[mem\]|^\[video\]'
 
 if [ ! -x "$EXE" ]; then
     echo "error: no built binary at WoSRecomp/build/. Run ./tools/build_host.sh first." >&2
