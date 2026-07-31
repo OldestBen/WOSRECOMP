@@ -2990,6 +2990,61 @@ are no real game pixels yet and there will not be until the frame path runs.
 That is not a renderer problem — the presenter is ready and will show whatever
 address it is given — it is the same loading blockage one layer along.
 
+## The graphics interrupt callback, read in full
+
+```
+82AB984C  mr     r31,r4          ; r31 = user data (0x4083D080)
+82AB9850  cmplwi cr6,r3,1        ; r3 = source
+82AB9854  bne    cr6,0x82AB98D0  ; not 1 -> the vblank branch
+
+; --- source 1: SWAP ---
+82AB9858  lwz    r11,10900(r31)  ; [userData+0x2A94]
+82AB9860  ori    r10,r10,0xF00D  ; r10 = 0x0BADF00D
+82AB9864  lwz    r30,16(r11)     ; [+0x10] = the swap callback
+82AB986C  bne    cr6,0x82AB9880  ; == 0x0BADF00D -> assert and trap
+82AB9884  beq    cr6,0x82AB9898  ; null -> skip the call
+82AB988C  lwz    r3,20(r11)      ; [+0x14] = its context
+82AB9894  bctrl                  ; call it
+82AB989C  lbz    r11,268(r13)    ; current CPU from the KPCR
+82AB98AC  slw    r29,r10,r11     ; 1 << cpu
+82AB98BC  andc   r11,r11,r29     ; clear this CPU's pending bit
+82AB98C4  stw    r11,0(r31)      ; in [[userData+0x2A94]+0]
+
+; --- source 0: VBLANK ---
+82AB98D8  lis    r11,0x7FC8
+82AB98DC  lwz    r11,25924(r11)  ; [0x7FC86544]
+82AB98E0  clrlwi. r11,r11,31     ; bit 0
+82AB98E4  beq    0x82AB98F0      ; clear -> return, do nothing
+82AB98EC  bl     0x82AC46C8      ; the vblank handler
+```
+
+Two findings, and the first is a negative worth having.
+
+**The vblank path is already correct.** Its gate is `[0x7FC86544]` bit 0, which
+an earlier round already sets before each call, and the argument count was
+already corrected from three to two. So `bl 0x82AC46C8` should be running sixty
+times a second. "Should be" is the phrasing that has cost this project its worst
+rounds, so there is now a tripwire on `sub_82AC46C8` rather than an assumption.
+That function is the only remaining place the two context events could
+plausibly be signalled from.
+
+**There is a second interrupt source we have never delivered.** Source 1 is the
+swap interrupt: it calls the game's own swap callback at
+`[[userData+0x2A94]+0x10]` with context `[+0x14]`, then clears this CPU's bit in
+`[[userData+0x2A94]+0]`. On the console the GPU raises it once a swap has
+completed. We have only ever delivered source 0, so a game waiting for its swap
+to be acknowledged would wait forever — the same shape as every other missing
+notification in this log.
+
+`VdSwap` now raises a pending flag and the vblank thread delivers source 1 on
+the next tick. Deferred rather than inline because inline would run the game's
+callback on whichever thread called `VdSwap`, at a point where the swap has not
+conceptually happened yet.
+
+This is ready before it is needed: `VdSwap` has still never been called. But
+when the frame path opens, both halves of the interrupt contract will be there
+rather than costing another round to discover.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

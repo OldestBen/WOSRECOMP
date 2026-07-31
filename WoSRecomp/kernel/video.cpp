@@ -34,6 +34,27 @@ constexpr uint32_t kDisplayHeight = 720;
 constexpr float    kRefreshRate   = 60.0f;
 
 std::atomic<uint32_t> g_interruptCallback{0};   // guest function address
+
+// A swap raised by VdSwap and not yet reported to the game.
+//
+// Reading the callback at 0x82AB9840 showed it has TWO sources, and we have
+// only ever delivered one:
+//
+//     source 0 (vblank): gated on [0x7FC86544] bit 0, then bl 0x82AC46C8
+//     source 1 (swap):   calls [[userData+0x2A94]+0x10] with context
+//                        [[userData+0x2A94]+0x14], then clears bit (1<<cpu)
+//                        in [[userData+0x2A94]+0]
+//
+// On the console the GPU raises source 1 shortly after a swap completes, and
+// the handler's job is to run the game's swap callback and clear the
+// per-CPU pending bit. Never delivering it means a game that waits for its
+// swap to be acknowledged waits forever — the same shape as every other
+// missing notification in this project.
+//
+// Raised by VdSwap, delivered on the next vblank rather than inline, because
+// inline would run the game's callback on whatever thread called VdSwap and
+// at a point where the swap has not conceptually happened yet.
+std::atomic<bool> g_swapPending{false};
 std::atomic<uint32_t> g_interruptUserData{0};
 std::atomic<bool> g_vblankRunning{false};
 std::atomic<uint64_t> g_vblankCount{0};
@@ -632,6 +653,22 @@ void VblankThread(uint8_t* base)
 
         fn(ctx, base);
 
+        // Then the swap interrupt, if VdSwap raised one. Same callback, same
+        // context, source 1 — see g_swapPending for why this is deferred to
+        // here rather than delivered inline from VdSwap.
+        if (g_swapPending.exchange(false))
+        {
+            ctx.r3.u64 = 1;                                         // source: swap
+            ctx.r4.u64 = g_interruptUserData.load(std::memory_order_relaxed);
+
+            static uint64_t s_swapInterrupts = 0;
+            if (++s_swapInterrupts <= 4)
+                printf("[video] swap interrupt #%llu delivered\n",
+                    (unsigned long long)s_swapInterrupts);
+
+            fn(ctx, base);
+        }
+
         const uint64_t n = g_vblankCount.fetch_add(1) + 1;
         if (n == 1)
             printf("[video] first vblank interrupt delivered\n");
@@ -924,6 +961,11 @@ PPC_FUNC(__imp__VdSwap)
             printf("\n");
         }
     }
+
+    // Tell the vblank thread to raise a swap interrupt. On the console the GPU
+    // does this once the swap has actually happened; the next vblank is the
+    // closest thing we have to that moment.
+    g_swapPending.store(true, std::memory_order_relaxed);
 
     // A physical-alias pointer among the arguments is the best front-buffer
     // candidate we can name without the layout: the front buffer is always

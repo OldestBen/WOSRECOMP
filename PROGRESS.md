@@ -69,15 +69,15 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-0. **The graphics threads' events, `0x4083FD7C` and `0x4083FDCC`.** These are
-   KEVENTs embedded in the two D3D context structures, they are what both
-   graphics threads block on, and nothing has ever set either. The most likely
-   setter is the graphics interrupt callback registered through
-   `VdSetGraphicsInterruptCallback` (guest `0x82AB9840`, user data
-   `0x4083D080`) — we call it every vblank, so either it is being called with
-   the wrong source argument or the events are set somewhere further in. This
-   now gates the frame path, and the frame path is what makes `VdSwap` fire and
-   hand the presenter a real front buffer.
+0. **Read `sub_82AC46C8`, the vblank handler.** The interrupt callback at
+   `0x82AB9840` has been read in full and it is *not* the problem: its vblank
+   branch is gated on `[0x7FC86544]` bit 0, we already set that bit, and the
+   argument count was already corrected, so `bl 0x82AC46C8` should run sixty
+   times a second. A tripwire is now on it to prove that rather than assume it.
+   If it fires, the handler is where the two context events must be signalled
+   and the next read is inside it. If it does not, the gate is not open after
+   all and the register write is not doing what video.cpp's comment claims.
+   `tools/ask.sh --func 0x82AC46C8`
 1. **Work forward from the stand-in, not backward from it.** The direct call to
    `sub_82965488` unblocks the loader and the guest drives itself from there.
    Finding what makes that call on the console is a correctness question, not a
@@ -114,6 +114,61 @@ Full evidence for each of these is in
    paths misbehave.
 
 ---
+
+## Session summary — 2026-07-31
+
+The largest single day of progress so far. In order:
+
+**Output, for the first time.** A 1280x720 Win32 window with a D3D11 swapchain,
+presenting from the vblank thread at 60 Hz. It shows a generated gradient
+because the game has not reached its own present path yet, but the window, the
+swapchain, the per-frame dynamic-texture upload and the frame clock are all
+real. Presentation was built before command translation deliberately: it is the
+only part of a renderer whose correctness is visible without the rest of it
+working, and everything after this can be checked by looking at the screen.
+
+**The loader deadlock broke.** The async read of `game.XEPACK` was completing
+correctly all along and nothing was consuming the result. Calling the consumer
+directly — `sub_82965488(0x00000080)` — made the guest's own state machine run
+to completion unaided: request object [0] went 1 → 3 → 4, its handle was
+recycled to `0x80000080`, ev4 was signalled for the first time in a dozen runs,
+and the Game Master left the wait it had been stuck in. The guest freeing the
+slot itself is what makes this a diagnosis rather than a hack, though the call
+remains a stand-in for a mechanism still unidentified.
+
+**Audio registration was failing on a technicality.**
+`XAudioRegisterRenderDriverClient` was unimplemented, and an unimplemented
+import is rewritten to `nop/nop/nop/blr` — so it returned with `r3` still
+holding its first argument, a pointer, which read back as an NTSTATUS is an
+error. The game had been told registration failed on every run since the
+project started. Implementing it moved the import count off 76 for the first
+time in a dozen runs and produced a call the game had never made before.
+
+**Four things I got wrong, corrected by measurement rather than argument:**
+
+- The APC route. Four rounds went into the theory that completion arrived via a
+  user APC at an alertable wait. The census settled it: **one** alertable wait
+  in sixty seconds out of a hundred and twenty thousand. Closed.
+- The 15-million-per-second `KeDelayExecutionThread` spin. I called it an
+  infinite sleep collapsing to a no-op through signed overflow. Logging the
+  actual values showed exactly one distinct interval ever passed at that site:
+  **zero**. It is `Sleep(0)`, a deliberate yield-spin. My fix predicted the
+  count would fall to nothing; it went *up*, which should have been treated as
+  falsifying immediately.
+- The two early-exiting threads. I proposed one was the missing I/O worker.
+  Both were read; both are audio.
+- `sub_82968498` "not reaching" `sub_82965488`. It was never supposed to. They
+  are on opposite sides of a producer/consumer boundary.
+
+**And two process failures worth more than any of the fixes.** Twice in
+consecutive rounds a diagnostic was added for a specific question, printed
+correctly, and thrown away by `run_game.sh`'s allow-list filter — first
+`[alertable]`, then `[audio]` one round after I wrote a comment about
+`[alertable]`. Its absence read as evidence rather than as a hole. The filter is
+now a deny-list: keep everything, name the few noisy things. Separately,
+`tools/check_syntax.sh` now catches the class of build break that cost two
+builds this session, and its own blind spot — `#ifdef _WIN32` code is invisible
+when it runs on Linux — is documented in its header.
 
 ## Log
 

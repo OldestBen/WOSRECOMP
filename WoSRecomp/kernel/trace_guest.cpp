@@ -198,3 +198,31 @@ PPC_FUNC(sub_82965488)
             (unsigned long long)n, ctx.r3.u32, uint32_t(ctx.lr) - 4);
     __imp__sub_82965488(ctx, base);
 }
+
+// ---------------------------------------------------------------------------
+// sub_82AC46C8 — the vblank handler proper.
+//
+// The graphics interrupt callback at 0x82AB9840 has two paths:
+//
+//     source 0 (vblank): gated on [0x7FC86544] bit 0, then bl 0x82AC46C8
+//     source 1 (swap):   calls [[userData+0x2A94]+0x10] with context
+//                        [[userData+0x2A94]+0x14], then clears bit (1<<cpu)
+//                        in [[userData+0x2A94]+0]
+//
+// We deliver source 0 every vblank and we do set that register bit, so this
+// should be running sixty times a second — and it is the only place left that
+// could plausibly signal the two context events the graphics threads block on.
+//
+// "Should be" is exactly the phrasing that has cost this project its worst
+// rounds, so measure it rather than reason about it. If this never trips, the
+// gate is not open after all and the register write is not doing what the
+// comment in video.cpp claims.
+// ---------------------------------------------------------------------------
+namespace { std::atomic<uint64_t> g_vblankHandler{0}; }
+
+PPC_FUNC_IMPL(__imp__sub_82AC46C8);
+PPC_FUNC(sub_82AC46C8)
+{
+    Trip("vblank handler sub_82AC46C8", g_vblankHandler, uint32_t(ctx.lr) - 4);
+    __imp__sub_82AC46C8(ctx, base);
+}
