@@ -67,13 +67,17 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-1. **Find the real completion mechanism.** Two threads (entries `0x82A25CE8`
-   and `0x829F4C80`) start and immediately return; a worker that runs its body
-   once and exits is a worker whose loop condition was false on the first test,
-   and an async-I/O worker calling `sub_82965D58` in a loop is exactly the
-   shape of the missing piece. `KeInitializeSemaphore` is also an untouched
-   stub with no semaphore object type behind it — if that queue is a semaphore,
-   the worker has nothing to wait on.
+1. **Read the poll loop at guest `0x82B1A680`.** It called
+   `KeDelayExecutionThread` fifteen million times in five seconds while the
+   request was outstanding and stopped dead when it completed, so it is the
+   loader waiting on exactly this. Two bugs in our own implementation of that
+   import were fixed in the process — absolute deadlines were yielding instead
+   of waiting, and alertable delays were not delivering APCs — either of which
+   may turn out to be the mechanism.
+   (The earlier hypothesis that one of the two early-exiting threads was the
+   I/O worker is **dead**: both were read and both are audio. `0x829F4C80` is
+   the XAudio mixer, which exits because `XAudioRegisterRenderDriverClient` is
+   a stub and never registers a client; `0x82A25CE8` is a sound worker.)
 2. **Then chase the next block.** Thread 4104 still waits forever on
    {`0x00010050`, `0x00010048`, `0x0001004C`}, and a graphics thread still
    waits on `0x4083FDCC`. Neither has moved.

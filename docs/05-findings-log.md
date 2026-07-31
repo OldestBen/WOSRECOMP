@@ -2543,6 +2543,117 @@ way to find the next problem is to get past this one, and every measurement
 this project has made was only possible because the run got far enough to make
 it. It is removable in one line once the real mechanism turns up.
 
+## Both early-exiting threads are audio — the hypothesis was wrong
+
+I proposed that one of the two threads that start and immediately return was
+the missing async-I/O worker. Both were read. Neither is.
+
+**`sub_829F4C80` (thread 4106) is the XAudio mixer.** Its loop is:
+
+```
+829F4CB8  addi r27,r10,28648   ; r27 = 0x82F76FE8   the semaphore
+829F4CBC  addi r29,r11,28684   ; r29 = 0x82F7700C   ev11, what it waits on
+829F4CA8  addi r28,r9,28668    ; r28 = 0x82F76FFC   ev15, what it sets
+
+829F4CC0  > mr r3,r29
+829F4CD4    bl KeWaitForSingleObject      ; alertable, INFINITE
+829F4CD8    lwz r3,28700(r31)             ; r3 = [0x82F7701C], the driver object
+829F4CDC    lwz r11,300(r3)               ; [driver+0x12C]
+829F4CE0    cntlzw r10,r11
+829F4CE4    rlwinm r11,r10,27,31,31       ; r30 = ([driver+0x12C] == 0) ? 1 : 0
+829F4CF0    beq cr6,0x829F4D14            ; non-zero -> do the work
+...
+829F4D30    bl KeSetEvent                 ; signal ev15
+829F4D38    beq cr6,0x829F4CC0            ; loop while r30 == 0
+829F4D3C    li r3,0                       ; else return
+```
+
+`cntlzw` + `rlwinm rX,rY,27,31,31` is the standard is-zero idiom: count leading
+zeros gives 32 only for zero, and rotating left 27 (shifting right 5) isolates
+that bit. So **the thread runs while `[[0x82F7701C]+0x12C]` is non-zero and
+exits the first time it reads zero** — which is what happened.
+
+`[0x82F7701C]` is the XAudio driver object, and `+0x12C` is almost certainly
+the registered render-driver client, written by
+`XAudioRegisterRenderDriverClient` — which in this build is an untouched
+generated stub. The mixer therefore has no client, finds nothing to mix, and
+retires on its first iteration. Real bug, precisely located, and it is *audio*,
+so it is not on the loading path.
+
+**`sub_82A25CE8` (thread 4105) is a sound worker.**
+
+```
+82A25D00  li   r30,-1            ; INFINITE
+82A25D08  lwz  r3,76(r31)        ; [ctx+0x4C]
+82A25D0C  bl   0x82B16C40        ; the acquire half of the acquire/release pair
+82A25D10  lbz  r11,80(r31)       ; [ctx+0x50]
+82A25D18  bne  cr6,0x82A25D3C    ; non-zero -> exit
+82A25D1C  > bl 0x82A25B50        ; the work
+82A25D38    beq cr6,0x82A25D1C   ; loop while [ctx+0x50] == 0
+```
+
+Its context is `0xB56CE7D0`, inside the `0xB5400000` block allocated for sound,
+and it is created immediately after `SOUNDSRC_RVB.PCK` is opened. Same shape as
+the mixer, same conclusion: not the I/O worker.
+
+So the hypothesis is dead, and the code comment and PROGRESS entry that carried
+it have been corrected rather than left to mislead the next reading.
+
+## The real lead: a fifteen-million-per-second poll
+
+The census had been reporting this for a dozen runs and I dismissed it twice —
+first as background noise, then because its call-site counter looked frozen.
+
+```
+[heartbeat] 15255914 call(s) ... KeDelayExecutionThread x15237000
+[callsites] bl@0x82B1A680 -> KeDelayExecutionThread   last arg 0xFFFFFFFF
+```
+
+Fifteen million calls in five seconds from a single call site, and it stops
+**dead** the instant the request completes — from millions per second to about
+120 calls total for the rest of the run. That is not noise and it is not a
+frozen counter. It is the loader polling for this exact completion.
+
+Whatever that loop tests each time round is what should have driven the
+consumer. `xex_info --func 0x82B1A680` is the next read, and it is a much
+better lead than the one it replaces, because unlike the thread hypothesis this
+one is anchored to a counter that moved in lockstep with the thing being
+diagnosed.
+
+### And reading our own implementation found two bugs in it
+
+The census reports that call site's argument as `0xFFFFFFFF`, which is not a
+duration — it is the **sentinel our own code logs on the absolute-time
+branch**. So the loader is passing a positive `LARGE_INTEGER`: a deadline, not
+a relative sleep. And that branch did this:
+
+```cpp
+else
+{
+    wos::LogCallSite("KeDelayExecutionThread", callSite, 0xFFFFFFFFu);
+    std::this_thread::yield();      // "no meaningful absolute clock to wait against"
+}
+```
+
+The comment justifying it was wrong when it was written. `SystemTime100ns()` is
+exactly that clock — it is what `KeQuerySystemTime` returns, and therefore what
+the game computed the deadline *from*. Subtracting one from the other gives the
+wait directly. Yielding instead is why a single call site logged fifteen
+million calls in five seconds: the caller asked to sleep until a time, we
+returned immediately, and its poll ran flat out. **Same class of mistake as
+every other stub that returned success to a wait — it does not fail, it deletes
+the timing the caller depends on.** Now fixed: it waits the remaining interval.
+
+Second, and possibly the real answer: **an alertable delay is a wait, and the
+kernel delivers pending APCs at every alertable wait.** We were delivering them
+at the four Nt/Ke wait imports and *not* at `KeDelayExecutionThread`. A thread
+that polls by sleeping rather than by waiting on an object therefore never
+reached a delivery point at all — which is exactly the shape of the loop at
+0x82B1A680. Now delivered when `r4 != 0`.
+
+Neither of these was found by looking for them. Both fell out of asking what
+`0xFFFFFFFF` actually meant instead of assuming it was a duration.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

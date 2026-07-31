@@ -592,10 +592,19 @@ void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
 // What is still unknown is WHO makes this call on the console. sub_82965488
 // has four call sites; the two that run (sub_829660C0, sub_82966D90) are on
 // the submission side, and the two that would consume a completion
-// (sub_82965D58, sub_82966C58) have never executed. Something that should
-// reach them does not — the most likely candidate being one of the two
-// threads (entries 0x82A25CE8 and 0x829F4C80) that start and immediately
-// return. Until that is found, this stands in for it.
+// (sub_82965D58, sub_82966C58) have never executed.
+//
+// It is NOT either of the two threads that start and immediately return. Both
+// were read and both are audio: 0x829F4C80 is the XAudio mixer (it waits on
+// 0x82F7700C, releases the semaphore at 0x82F76FE8 and sets 0x82F76FFC), and
+// 0x82A25CE8 is a sound worker whose context sits in the sound heap. Neither
+// touches the I/O request table.
+//
+// The live lead is the loop that calls KeDelayExecutionThread from guest
+// 0x82B1A680. It ran fifteen million times in five seconds while the request
+// was outstanding and stopped dead the moment the request completed, so it is
+// the loader waiting on this exact thing — and whatever it polls is what
+// should have driven the completion.
 //
 // Keeping the game deadlocked in the name of purity would buy nothing: the
 // only way to find the next problem is to get past this one, and this is

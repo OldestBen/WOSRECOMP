@@ -15,6 +15,7 @@
 #include "kernel_overrides.h"
 #include "guest.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <mutex>
@@ -270,6 +271,14 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
 {
     WOS_IMPORT_STUB("KeDelayExecutionThread");
 
+    // An ALERTABLE delay is a wait, and the kernel delivers pending APCs at
+    // every alertable wait — this one included. We were delivering them at the
+    // four Nt/Ke wait imports and not here, which meant a thread that polls by
+    // sleeping rather than by waiting on an object never reached a delivery
+    // point at all. That is exactly the shape of the loop at guest 0x82B1A680.
+    if (ctx.r4.u32 != 0)
+        wos::DeliverPendingApcs(ctx, base);
+
     // Attributed by call site because implementing it properly did not end the
     // problem, it moved it. The stub's 45 M calls per five seconds became a
     // sustained 34 M — a real sleep, called in a loop by something the
@@ -301,8 +310,29 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
     }
     else
     {
-        wos::LogCallSite("KeDelayExecutionThread", callSite, 0xFFFFFFFFu);
-        std::this_thread::yield();
+        // Absolute: a deadline in 100 ns units since 1601, the same epoch
+        // KeQuerySystemTime hands out. This used to yield on the grounds that
+        // there was "no meaningful absolute system clock to wait against" —
+        // but SystemTime100ns is exactly that clock, and it is what the game
+        // computed the deadline from in the first place.
+        //
+        // Yielding instead of waiting is why one call site here logged
+        // FIFTEEN MILLION calls in five seconds. The caller asked to sleep
+        // until a time; we returned immediately, so its poll loop ran flat out
+        // burning a core. Same class of mistake as every other stub that
+        // returned success to a wait: it does not fail, it deletes the timing
+        // the caller depends on.
+        const uint64_t now = SystemTime100ns();
+        const uint64_t deadline = uint64_t(interval);
+        const uint64_t remaining = (deadline > now) ? (deadline - now) : 0;
+
+        wos::LogCallSite("KeDelayExecutionThread", callSite,
+            uint32_t(std::min<uint64_t>(remaining / 10000, 0xFFFFFFFEu)));
+
+        if (remaining == 0)
+            std::this_thread::yield();
+        else
+            std::this_thread::sleep_for(std::chrono::nanoseconds(remaining * 100));
     }
 
     ctx.r3.u64 = wos::kStatusSuccess;
