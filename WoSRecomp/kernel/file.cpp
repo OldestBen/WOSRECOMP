@@ -14,6 +14,7 @@
 #include "object.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <vector>
 #include <cstdlib>
@@ -568,6 +569,51 @@ void ReportRequestBlock(uint8_t* base, const char* when)
 void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
 {
     t_apcQueue.push_back({ routine, context, iosb });
+}
+
+// Deliver pending APCs at a wait, and report which wait it was.
+//
+// An alertable wait has two ways to end: the object signals, or an APC is
+// delivered. In the second case the wait does NOT go on to block — it returns
+// STATUS_USER_APC (0xC0) so the caller can look at whatever the APC changed.
+// That is the entire point of alertability; a caller that did not want to be
+// interrupted would pass Alertable = FALSE.
+//
+// The first version of this lived in sync.cpp and only printed when it
+// returned STATUS_USER_APC. A run produced NO such lines at all, which was
+// ambiguous between two very different things: the APC never being delivered
+// at a wait, and it being delivered at a wait that was not alertable. The log
+// showed the APC *was* delivered, so it must be the second — but "must be"
+// is exactly the reasoning that has cost this project several rounds.
+//
+// So it now prints on every delivery, with the Alertable value, before
+// deciding anything. That distinguishes the two cases outright.
+//
+// This matters more than it looks. If the delivering wait is NOT alertable,
+// then we are delivering the APC somewhere the real kernel would not — a
+// non-alertable wait does not run user APCs — and the console must be
+// delivering it somewhere else entirely. That would make our delivery point
+// wrong in the opposite direction to everything assumed so far.
+//
+// Returns true if the caller should return immediately, with r3 already set.
+bool AlertableReturn(PPCContext& ctx, uint8_t* base, uint32_t alertable, const char* who)
+{
+    if (!DeliverPendingApcs(ctx, base))
+        return false;
+
+    static std::atomic<uint64_t> s_delivered{0};
+    const uint64_t n = s_delivered.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 8)
+        printf("[apc] delivered at %s, Alertable=%u -> %s (#%llu, guest 0x%08X)\n",
+            who, alertable,
+            alertable != 0 ? "STATUS_USER_APC" : "wait continues (NOT alertable)",
+            (unsigned long long)n, uint32_t(ctx.lr) - 4);
+
+    if (alertable == 0)
+        return false;
+
+    ctx.r3.u64 = kStatusUserApc;
+    return true;
 }
 
 // ---------------------------------------------------------------------------

@@ -2700,6 +2700,47 @@ first eight, because if it fires and nothing improves, the next question is
 whether the guest's wrapper handles 0xC0 at all — and that is only answerable if
 we know it was returned.
 
+## No STATUS_USER_APC lines at all — and that is the finding
+
+The alertable-return build produced **zero** `STATUS_USER_APC` lines, with the
+stand-in disabled. Object [0] stayed in state 1, imports stayed at 76.
+
+The instrument only printed when it *acted*, which makes that result ambiguous
+between two very different things:
+
+1. the APC is never delivered at a wait, so the code never ran; or
+2. the APC is delivered at a wait whose **Alertable is FALSE**, so the code ran
+   and correctly declined to do anything.
+
+The log settles it as far as it can: `[file] delivering queued APC` appears, so
+the APC *is* delivered. Therefore it must be (2). But "must be" is exactly the
+reasoning that has cost this project several rounds, so the helper now prints on
+**every** delivery with the Alertable value, before deciding anything.
+
+### Why this matters more than it looks
+
+If the delivering wait is not alertable, we are delivering the APC somewhere
+**the real kernel would not** — a non-alertable wait does not run user APCs.
+Our delivery point would then be wrong in the opposite direction to everything
+assumed so far: not too late, but too eager, and at a call the console would
+have ignored.
+
+The circumstantial case is strong. The delivery line lands immediately after the
+read returns, and the very next thing in the log is `KeDelayExecutionThread`
+running five million times — the loader's retry loop. So the wait that delivered
+is almost certainly the first `Sleep` of that loop, and if it prints
+`Alertable=0` then the console never delivers there, and the completion must
+arrive by a route we have not found at all.
+
+That would also explain why every attempt to make the APC path work has failed
+while the direct call to `sub_82965488` succeeds instantly: the APC may simply
+not be the mechanism.
+
+`AlertableReturn` now lives in `kernel/file.cpp` beside the rest of the APC
+machinery rather than in sync.cpp, and all five wait imports — the four Nt/Ke
+waits plus `KeDelayExecutionThread` — route through it, so the Alertable value
+is reported in one place and one format.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
