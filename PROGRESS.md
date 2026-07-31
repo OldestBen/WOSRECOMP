@@ -28,7 +28,8 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **BOOTS, RUNS A STEADY RENDER LOOP, LOADS SOME ASSETS.** 79
+- **Stage:** **BOOTS, OPENS A WINDOW, RUNS A STEADY RENDER LOOP, LOADS SOME
+  ASSETS.** 79
   imports reached, 76 implemented. Twelve threads. The command processor
   consumes the ring continuously, the GPU fence tracks the CPU fence four
   behind, and the game's own D3D layer is satisfied — no hang report, runs for

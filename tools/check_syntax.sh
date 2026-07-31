@@ -34,7 +34,7 @@ if [ $# -gt 0 ]; then
 else
     # imports_generated.cpp is generated and gitignored; skip it if absent.
     FILES=()
-    for f in "$KERNEL"/*.cpp; do
+    for f in "$KERNEL"/*.cpp "$REPO_ROOT/WoSRecomp/gpu"/*.cpp; do
         [ -e "$f" ] || continue
         FILES+=("$f")
     done
@@ -45,7 +45,8 @@ checked=0
 for f in "${FILES[@]}"; do
     name="$(basename "$f")"
     out="$("$CXX" -fsyntax-only -std=c++20 -Wall -Wno-unused-function \
-        -I"$SCRIPT_DIR/syntax_shim" -I"$KERNEL" "$f" 2>&1)"
+        -I"$SCRIPT_DIR/syntax_shim" -I"$KERNEL" \
+        -I"$REPO_ROOT/WoSRecomp/gpu" "$f" 2>&1)"
     if [ $? -eq 0 ]; then
         printf '  ok    %s\n' "$name"
     else

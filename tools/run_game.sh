@@ -30,18 +30,25 @@ EXE="$REPO_ROOT/WoSRecomp/build/WoSRecomp.exe"
 SECONDS_TO_RUN="${1:-45}"
 FILTER="${2:-}"
 
-# The default filter is everything that has ever answered a question here.
+# What the digest DROPS, rather than what it keeps.
 #
-# Get this wrong and a whole round is wasted: the [alertable] census was added
-# specifically to settle a question, printed correctly every heartbeat, and then
-# dropped on the floor because this pattern did not list it. A diagnostic that
-# is collected and filtered out is worse than one that was never written, since
-# its absence reads as evidence.
+# The allow-list version of this cost two rounds in a row. Both times a new
+# diagnostic was added for a specific question, printed correctly, and thrown
+# away here because nobody updated the pattern — and its absence read as
+# evidence rather than as a hole. The second time was [audio], one round after
+# writing a comment about the first time being [alertable].
 #
-# So the rule is now: match every prefix the runtime emits, and exclude only
-# what is genuinely too noisy — the per-event [waits] census, which repeats a
-# dozen lines every five seconds. Everything else stays.
-DEFAULT_FILTER='^\[state\]|^\[probe\]|^\[trace\]|^\[file\]|^\[thread\]|^\[import|^\[sync\]|^\[watchdog\]|^\[heartbeat\]|^\[alertable\]|^\[delay\]|^\[callsites\]|^\[waitsites\]|^\[apc\]|^\[d3d\]|^\[gpu\]|^\[phys\]|^\[mem\]|^\[video\]'
+# An allow-list is wrong for this job: every new prefix is a silent data loss
+# waiting to happen, and the failure is invisible at exactly the moment the
+# diagnostic matters most. So keep everything by default and name the few
+# things that are genuinely too noisy. A new [whatever] line now reaches the
+# digest automatically.
+#
+# Excluded:
+#   [waits]     the per-event census, a dozen lines every five seconds
+#   [guest page] first-touch commits, hundreds of them, all uninteresting
+#   [alertable] retained — small, and it answers a live question
+NOISE_FILTER='^\[waits\]|^\[guest page\]|^ *ev[0-9]|^ *bl@'
 
 if [ ! -x "$EXE" ]; then
     echo "error: no built binary at WoSRecomp/build/. Run ./tools/build_host.sh first." >&2
@@ -95,8 +102,11 @@ total="$(wc -l < "$LOG" | tr -d ' ')"
 DIGEST="$REPO_ROOT/logs/$STAMP-run.digest.txt"
 if [ "$FILTER" = "all" ]; then
     cp "$LOG" "$DIGEST"
+elif [ -n "$FILTER" ]; then
+    # An explicit filter is a keep-pattern: the caller asked for exactly this.
+    grep -E "$FILTER" "$LOG" > "$DIGEST" 2>/dev/null || true
 else
-    grep -E "${FILTER:-$DEFAULT_FILTER}" "$LOG" > "$DIGEST" 2>/dev/null || true
+    grep -Ev "$NOISE_FILTER" "$LOG" > "$DIGEST" 2>/dev/null || true
 fi
 
 kept="$(wc -l < "$DIGEST" | tr -d ' ')"

@@ -54,6 +54,8 @@ set(WOS_SOURCES
     kernel/debug.cpp
     kernel/rtl.cpp
     kernel/audio.cpp
+    # The renderer, such as it is: a window and a swapchain. See gpu/present.h.
+    gpu/present.cpp
     kernel/d3d_probe.cpp
     # Reads the guest's own globals rather than reporting what the host did.
     kernel/state_probe.cpp
@@ -107,6 +109,10 @@ if(WIN32)
     # dbghelp: symbolises the host stack so a runaway guest stack reports the
     # actual sub_XXXXXXXX cycle instead of "it recursed somewhere".
     target_link_libraries(WoSRecomp PRIVATE dbghelp)
+
+    # The presenter. d3d11 for the device and swapchain, dxgi for the format
+    # enums; both ship with the Windows SDK, so this needs no new dependency.
+    target_link_libraries(WoSRecomp PRIVATE d3d11 dxgi)
 
     # Recompiled guest functions are ordinary C++ calls, so guest call depth is
     # host stack depth. The default 1 MiB overflows after a few thousand guest

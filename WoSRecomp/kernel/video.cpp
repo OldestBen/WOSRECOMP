@@ -14,6 +14,7 @@
 #include "import_log.h"
 #include "kernel_overrides.h"
 #include "guest.h"
+#include "../gpu/present.h"
 #include "object.h"
 
 #include <atomic>
@@ -549,6 +550,12 @@ void VblankThread(uint8_t* base)
         next += std::chrono::microseconds(16667);   // ~60 Hz
         std::this_thread::sleep_until(next);
 
+        // The display's frame clock is also the presenter's. Doing this here
+        // rather than from VdSwap means the window keeps updating even though
+        // the game has never yet reached its own present path, which is what
+        // makes "the loop is alive" visible before any of the rendering works.
+        wos::gpu::PresentFrame();
+
         // Tell the game the GPU has consumed everything it submitted.
         //
         // Holding this at 0 is wrong in a way that hangs: for a ring buffer,
@@ -652,6 +659,7 @@ PPC_FUNC(__imp__VdSetGraphicsInterruptCallback)
         std::thread(VblankThread, base).detach();
         std::thread(CommandProcessorThread, base).detach();
         printf("[video] vblank thread started at ~60 Hz\n");
+        wos::gpu::StartPresenter(base);
         printf("[video] command processor started (200 us poll)\n");
     }
 }
@@ -875,10 +883,67 @@ PPC_FUNC(__imp__VdGetSystemCommandBuffer)
 #endif
 
 #ifdef WOS_IMPL_VdSwap
+// VOID VdSwap(D3DDevice* device, ...) — the argument layout is not confirmed,
+// which is why this reports rather than assumes.
+//
+// This has never been called in any run: it sits behind the game's own present
+// gate, which is behind the loading path. When it finally fires, the front
+// buffer address is the single most valuable thing in the whole log, because it
+// is the pointer that turns the presenter from a test pattern into the game's
+// actual output. So dump the arguments and the first words each one points at,
+// and hand the most plausible candidate to the presenter.
 PPC_FUNC(__imp__VdSwap)
 {
     WOS_IMPORT_STUB("VdSwap");
-    // A frame would be presented here. Counted by the vblank thread instead.
+
+    static bool s_first = true;
+    if (s_first)
+    {
+        s_first = false;
+        printf("[video] *** VdSwap CALLED *** r3=0x%08X r4=0x%08X r5=0x%08X "
+               "r6=0x%08X r7=0x%08X (from guest 0x%08X)\n",
+            ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32,
+            uint32_t(ctx.lr) - 4);
+
+        // Every argument that looks like a guest pointer, with what it points
+        // at. One of these is the front buffer; printing all of them costs
+        // nothing and means the answer is in the first run that gets here
+        // rather than the second.
+        const uint32_t args[] = { ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
+                                  ctx.r6.u32, ctx.r7.u32 };
+        for (unsigned i = 0; i < 5; ++i)
+        {
+            const uint32_t a = args[i];
+            const bool heap  = (a >= 0x40000000u && a < 0x50000000u);
+            const bool phys  = (a >= 0xA0000000u && a < 0xC0000000u);
+            if (!heap && !phys)
+                continue;
+            printf("[video]   r%u -> 0x%08X:", i + 3, a);
+            for (unsigned w = 0; w < 6; ++w)
+                printf(" %08X", wos::LoadU32(base, a + w * 4));
+            printf("\n");
+        }
+    }
+
+    // A physical-alias pointer among the arguments is the best front-buffer
+    // candidate we can name without the layout: the front buffer is always
+    // physically addressed on this hardware, and the other arguments are
+    // device/context pointers from the virtual heap. If it turns out to be the
+    // wrong one, the dump above says which is right, and the window shows
+    // something visibly wrong rather than nothing.
+    if (!wos::gpu::HasFrontBuffer())
+    {
+        const uint32_t args[] = { ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32 };
+        for (const uint32_t a : args)
+        {
+            if (a >= 0xA0000000u && a < 0xC0000000u)
+            {
+                wos::gpu::SetFrontBuffer(a, 1280, 720, 1280 * 4);
+                break;
+            }
+        }
+    }
+
     ctx.r3.u64 = 0;
 }
 #endif
