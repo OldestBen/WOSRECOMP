@@ -13,6 +13,12 @@
 # TYPE-CHECKS. It proves nothing about behaviour, and it is not a substitute
 # for ./tools/build_host.sh.
 #
+# KNOWN GAP: anything inside #ifdef _WIN32 is invisible here when run on Linux,
+# so Win32/D3D code in gpu/ is checked only by the real build. That gap has
+# already cost one build (LoadCursorW with an ANSI IDC_ARROW). If you are
+# editing platform-specific code, the Windows build is the only check that
+# counts.
+#
 # Usage:  tools/check_syntax.sh [file.cpp ...]      (default: all of kernel/)
 set -uo pipefail
 

@@ -173,7 +173,12 @@ bool StartPresenter(uint8_t* guestBase)
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = GetModuleHandleW(nullptr);
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    // MAKEINTRESOURCEW rather than IDC_ARROW: this project does not define
+    // UNICODE, so IDC_ARROW expands to MAKEINTRESOURCEA and will not convert to
+    // the LPCWSTR that LoadCursorW wants. Everything else here is explicitly
+    // the W variant with L"" literals, so spell this one out too rather than
+    // mixing in an A call.
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));   // IDC_ARROW
     wc.lpszClassName = L"WoSRecompWindow";
     RegisterClassExW(&wc);
 
