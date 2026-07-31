@@ -63,6 +63,7 @@ WOSRECOMP/
 │   ├── 04-roadmap.md
 │   ├── 05-findings-log.md   # WoS-specific data found so far (addresses, XEX info) — paste outputs here
 │   ├── 06-windows-setup.md  # native Windows toolchain setup (VS 2022 + Git Bash)
+│   ├── 07-resuming.md       # ⭐ after a reboot: shell, env, build, run — start here
 │   └── sessions/            # per-session logs: dead ends, ruled-out approaches, unverified claims
 └── CMakeLists.txt
 ```
