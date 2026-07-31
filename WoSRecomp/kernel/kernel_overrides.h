@@ -178,3 +178,17 @@
 #define WOS_IMPL_XAudioUnregisterRenderDriverClient 1
 #define WOS_IMPL_XAudioGetSpeakerConfig 1
 #define WOS_IMPL_XAudioGetVoiceCategoryVolume 1
+
+// ---------------------------------------------------------------------------
+// Controller input — kernel/input.cpp
+//
+// A nop'd XamInputGetState returns r3 = the user index = 0 = ERROR_SUCCESS,
+// with the state structure never written. The game has therefore been told a
+// pad is connected with every control at whatever was on the stack. See the
+// comment in input.cpp.
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_XamInputGetState 1
+#define WOS_IMPL_XamInputGetCapabilities 1
+#define WOS_IMPL_XamInputSetState 1
+#define WOS_IMPL_XamInputGetKeystroke 1
+#define WOS_IMPL_XamInputGetKeystrokeEx 1

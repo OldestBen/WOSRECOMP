@@ -3045,6 +3045,73 @@ This is ready before it is needed: `VdSwap` has still never been called. But
 when the frame path opens, both halves of the interrupt contract will be there
 rather than costing another round to discover.
 
+## The vblank handler runs, and still signals nothing
+
+```
+[trace] vblank handler sub_82AC46C8 call #1 (from guest 0x82AB98EC)
+[trace] vblank handler sub_82AC46C8 call #10
+[trace] vblank handler sub_82AC46C8 call #100
+[trace] vblank handler sub_82AC46C8 call #1000
+```
+
+Measured rather than assumed, and the assumption held for once: the gate at
+`[0x7FC86544]` bit 0 is open, the callback's vblank branch is taken, and
+`sub_82AC46C8` runs sixty times a second for the whole run. ev5 (`0x4083FD7C`)
+and ev6 (`0x4083FDCC`) are still never set.
+
+So the handler is reached and does not signal. Whatever decides that is inside
+those instructions, and that is the next read — `--func 0x82AC46C8`. This is a
+much better position than the previous one: the chain from the vblank timer to
+guest code is now verified end to end, and only the last function is unknown.
+
+## The audio client structure
+
+```
+[audio] XAudioRegisterRenderDriverClient(client 0x81FFE190, out 0x40A466D0)
+        from guest 0x829FDF6C
+[audio]   client words: 829F8278 40A44DCC 00000000 00000006
+```
+
+Layout, from the values: `+0x00` is a guest code address — the render callback.
+`+0x04` is a heap pointer — its context. `+0x0C` is 6, plausibly a buffer or
+channel count. Printed rather than guessed at, which is the whole reason the
+implementation logs instead of assuming a struct.
+
+Note what follows it: `XAudioGetSpeakerConfig`, `XamNotifyCreateListener`, then
+**`XAudioUnregisterRenderDriverClient`** — the game registers, queries, and
+immediately unregisters. That is new behaviour; the call did not exist in any
+run before registration started succeeding. Whether it is a capability probe or
+a failure further along is not yet known, and the mixer thread still retires,
+so `[[0x82F7701C]+0x12C]` is still never populated.
+
+## Input was being lied to, in the worst direction
+
+`XamInputGetState` was an unimplemented import, so it was rewritten to
+`nop/nop/nop/blr` and returned with `r3` still holding its first argument — the
+user index, which for player one is **0**. Zero is `ERROR_SUCCESS`.
+
+So the game has been told, on every poll of every run, that a controller is
+connected — and then read the state structure, which nothing had written, as
+whatever happened to be on the guest stack. Every button and every axis, every
+frame, from uninitialised memory.
+
+That is worse than reporting no pad, in both directions: a title waiting at a
+"press START" prompt waits forever on garbage that never happens to match, and
+a title watching for a disconnect can take that path on noise.
+
+`kernel/input.cpp` implements it against real XInput. This is the one place in
+the whole runtime where host and guest hardware are the same device — the 360
+pad *is* an XInput pad, and the button bits, stick ranges and trigger ranges
+are identical — so the state copy is a genuine copy with a byte-swap rather
+than a mapping. XInput is loaded dynamically because the DLL name has changed
+three times across Windows versions, and a link-time dependency on the wrong
+one is a process that will not start at all, where a failed runtime lookup is
+just "no pad".
+
+The out-parameter is taken from whichever of r4/r5 looks like a guest pointer:
+this game's SDK generation used `(userIndex, flags, out)` but earlier ones used
+`(userIndex, out)`, and writing the state to a flags word would be silent.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

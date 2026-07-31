@@ -54,6 +54,7 @@ set(WOS_SOURCES
     kernel/debug.cpp
     kernel/rtl.cpp
     kernel/audio.cpp
+    kernel/input.cpp
     # The renderer, such as it is: a window and a swapchain. See gpu/present.h.
     gpu/present.cpp
     kernel/d3d_probe.cpp

@@ -69,14 +69,12 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-0. **Read `sub_82AC46C8`, the vblank handler.** The interrupt callback at
-   `0x82AB9840` has been read in full and it is *not* the problem: its vblank
-   branch is gated on `[0x7FC86544]` bit 0, we already set that bit, and the
-   argument count was already corrected, so `bl 0x82AC46C8` should run sixty
-   times a second. A tripwire is now on it to prove that rather than assume it.
-   If it fires, the handler is where the two context events must be signalled
-   and the next read is inside it. If it does not, the gate is not open after
-   all and the register write is not doing what video.cpp's comment claims.
+0. **Read `sub_82AC46C8`, the vblank handler.** The tripwire fired — call #1,
+   #10, #100, #1000 — so the chain from the vblank timer through the interrupt
+   callback into guest code is verified end to end, and the handler runs sixty
+   times a second. It still does not signal ev5 (`0x4083FD7C`) or ev6
+   (`0x4083FDCC`), which the two graphics threads block on. Only the last
+   function in the chain is now unknown.
    `tools/ask.sh --func 0x82AC46C8`
 1. **Work forward from the stand-in, not backward from it.** The direct call to
    `sub_82965488` unblocks the loader and the guest drives itself from there.
