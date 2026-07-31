@@ -2961,6 +2961,35 @@ config now reports stereo instead of leaving the out-parameter unwritten, and
 voice-category volume returns 1.0f rather than a zero that would be
 indistinguishable from working-but-silent audio.
 
+## A window, with something in it
+
+```
+[present] window open, 1280x720, D3D11 feature level 0xB000
+[present] showing a test pattern until VdSwap hands over a front buffer
+```
+
+First visible output this project has ever produced. It is a generated
+gradient rather than the game's own pixels, but everything underneath it is
+real: a Win32 window, a DXGI swapchain, a dynamic texture uploaded every frame,
+and the vblank thread driving presentation at 60 Hz. The moving red channel is
+the frame counter, so the pattern being *animated* is itself the proof that the
+loop is live.
+
+One build cost on the way: `IDC_ARROW` expands to `MAKEINTRESOURCEA` because
+this project does not define `UNICODE`, and it will not convert to the
+`LPCWSTR` that `LoadCursorW` takes. Worth recording because of *why* the
+syntax checker missed it — everything inside `#ifdef _WIN32` is invisible when
+`check_syntax.sh` runs on Linux, so all the Win32 and D3D code in `gpu/` is
+only ever checked by the real Windows build. That limitation is now written
+into the script's own header.
+
+### What it does not do
+
+`VdSwap` has never been called, so no front buffer has been handed over. There
+are no real game pixels yet and there will not be until the frame path runs.
+That is not a renderer problem — the presenter is ready and will show whatever
+address it is given — it is the same loading blockage one layer along.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via

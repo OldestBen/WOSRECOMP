@@ -28,20 +28,21 @@ successes there) are in [`docs/sessions/README.md`](docs/sessions/README.md).
 
 ## Current State
 
-- **Stage:** **BOOTS, OPENS A WINDOW, RUNS A STEADY RENDER LOOP, LOADS SOME
-  ASSETS.** 79
-  imports reached, 76 implemented. Twelve threads. The command processor
-  consumes the ring continuously, the GPU fence tracks the CPU fence four
-  behind, and the game's own D3D layer is satisfied — no hang report, runs for
-  minutes. **Nothing is drawn: there is no renderer and no window.**
-- **One blocker, precisely located.** Two threads — `sub_829677D0` (the game's
-  own "Game Master") and `sub_82A7CD00` — wait forever on five events that
-  nothing ever signals. The whole chain is mapped: every event is created at
-  guest `0x82B16368` and set from `0x82B16C58`; the only code that would
-  signal these five is five instructions at `0x82965534`, guarded by two
-  branches at `0x829654F8`/`0x82965504`, reached from a request-completion
-  function at `0x82965488` with four callers, none of which has ever appeared
-  on a stack. The request objects stay in state 1 instead of moving to 3.
+- **Stage:** **BOOTS, OPENS A WINDOW, PRESENTS AT 60 Hz, LOADS SOME ASSETS.**
+  77 imports reached. Twelve threads. The command processor consumes the ring
+  continuously, the GPU fence tracks the CPU fence a couple behind, and the
+  game's own D3D layer is satisfied — no hang report, runs for minutes.
+- **There is a window.** 1280x720, Win32 + D3D11, presenting from the vblank
+  thread. It shows a generated pattern, because the game has not yet reached
+  its own present path — `VdSwap` has still never been called. But the window,
+  the swapchain, the 60 Hz clock and the guest-memory upload path are all real
+  and all verified by looking at them, which is the whole reason presentation
+  was built before command translation.
+- **The loader deadlock is broken** (see below), and the Game Master now runs.
+  Two threads still wait forever: `sub_82A7CD00` (4104) on
+  {`0x00010050`, `0x00010048`, `0x0001004C`}, and a graphics thread on the
+  guest-embedded event `0x4083FDCC`. Neither of those five events has ever been
+  signalled by anything.
 - **THE DEADLOCK IS BROKEN.** The async read completes correctly and nothing
   was consuming the result. Calling the consumer, `sub_82965488(0x00000080)`,
   at APC-delivery time made the guest's own state machine run to completion on
@@ -68,7 +69,16 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-0. **Work forward from the stand-in, not backward from it.** The direct call to
+0. **The graphics threads' events, `0x4083FD7C` and `0x4083FDCC`.** These are
+   KEVENTs embedded in the two D3D context structures, they are what both
+   graphics threads block on, and nothing has ever set either. The most likely
+   setter is the graphics interrupt callback registered through
+   `VdSetGraphicsInterruptCallback` (guest `0x82AB9840`, user data
+   `0x4083D080`) — we call it every vblank, so either it is being called with
+   the wrong source argument or the events are set somewhere further in. This
+   now gates the frame path, and the frame path is what makes `VdSwap` fire and
+   hand the presenter a real front buffer.
+1. **Work forward from the stand-in, not backward from it.** The direct call to
    `sub_82965488` unblocks the loader and the guest drives itself from there.
    Finding what makes that call on the console is a correctness question, not a
    progress blocker, and four rounds have gone into it. It is now a background
@@ -76,7 +86,7 @@ Full evidence for each of these is in
    runs done for other reasons. The next blockers are thread 4104 on
    {`0x00010050`, `0x00010048`, `0x0001004C`} and the graphics thread on
    `0x4083FDCC`.
-1. **(background) Read the poll loop at guest `0x82B1A680`.** It called
+2. **(background) Read the poll loop at guest `0x82B1A680`.** It called
    `KeDelayExecutionThread` fifteen million times in five seconds while the
    request was outstanding and stopped dead when it completed, so it is the
    loader waiting on exactly this. Two bugs in our own implementation of that
