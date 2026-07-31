@@ -67,6 +67,17 @@ needed sometimes:
 | `./tools/build_tools.sh` | only when `xex_info` or the recompiler changed |
 | `./tools/build_ppc.sh` | only when the recompiler itself changed — slow, regenerates all 198 translated sources |
 
+Before pushing a change to `WoSRecomp/kernel/`, run:
+
+```bash
+tools/check_syntax.sh
+```
+
+It compiles every hand-written kernel source with `-fsyntax-only` against a
+stand-in for the generated recompiler header, so it needs neither MSVC nor the
+XEX and takes about a second. It proves the code parses and type-checks; it
+proves nothing about behaviour and is not a substitute for `build_host.sh`.
+
 If the link fails with an **undefined symbol in namespace `wos`**, that is our
 own code, not a missing guest import: a new `.cpp` under `kernel/` was not
 added to `WOS_SOURCES` in `WoSRecomp/CMakeLists.txt`. That list is explicit,

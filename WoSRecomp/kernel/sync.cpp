@@ -325,6 +325,45 @@ int64_t TimeoutToMillis(uint8_t* base, uint32_t timeoutPtr)
     return 0;
 }
 
+// Deliver pending APCs, and if any ran on an ALERTABLE wait, return
+// STATUS_USER_APC instead of blocking.
+//
+// This is the half of APC semantics we were missing, and it may be the whole
+// missing completion mechanism.
+//
+// An alertable wait has two ways to end: the object signals, or an APC is
+// delivered. In the second case the wait does NOT go on to block — it returns
+// STATUS_USER_APC (0xC0) so the caller can look at whatever the APC changed and
+// decide what to do next. That is the entire point of alertability; a caller
+// that did not want to be interrupted would pass Alertable = FALSE.
+//
+// We were delivering the APC and then blocking anyway, which silently deletes
+// the notification. The observed behaviour matches exactly: the loader issues
+// the read, the APC runs and moves the file request to state 2, and the loader
+// — never told anything happened — carries on waiting on events that only the
+// completion it was supposed to run would signal.
+//
+// Returns true if the caller should return immediately, with r3 already set.
+bool AlertableReturn(PPCContext& ctx, uint8_t* base, uint32_t alertable, const char* who)
+{
+    if (!wos::DeliverPendingApcs(ctx, base))
+        return false;
+    if (alertable == 0)
+        return false;
+
+    // Loud for the first few, because if this fires and nothing improves, the
+    // next question is whether the guest's wrapper handles 0xC0 at all — and
+    // that is only answerable if we know it was returned.
+    static std::atomic<uint64_t> s_count{0};
+    if (const uint64_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1; n <= 8)
+        printf("[sync] %s: APC delivered on an alertable wait -> STATUS_USER_APC "
+               "(#%llu, guest 0x%08X)\n",
+            who, (unsigned long long)n, uint32_t(ctx.lr) - 4);
+
+    ctx.r3.u64 = wos::kStatusUserApc;
+    return true;
+}
+
 } // namespace
 
 #ifdef WOS_IMPL_NtCreateEvent
@@ -476,6 +515,9 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
     // See AlertableReturn below for why that matters here.
     if (AlertableReturn(ctx, base, ctx.r5.u32, "NtWaitForSingleObjectEx"))
         return;
+
+    const uint32_t callSite = uint32_t(ctx.lr);
+    auto obj = wos::ObjectFromAny(ctx.r3.u32);
     const int64_t timeoutMs = TimeoutToMillis(base, ctx.r6.u32);
 
     if (auto* ev = dynamic_cast<wos::EventObject*>(obj.get()))
@@ -638,45 +680,6 @@ wos::EventObject* EmbeddedEvent(uint32_t guestPtr, const char* who)
 
     wos::RegisterObjectAt(guestPtr, ev);
     return ev.get();
-}
-
-// Deliver pending APCs, and if any ran on an ALERTABLE wait, return
-// STATUS_USER_APC instead of blocking.
-//
-// This is the half of APC semantics we were missing, and it may be the whole
-// missing completion mechanism.
-//
-// An alertable wait has two ways to end: the object signals, or an APC is
-// delivered. In the second case the wait does NOT go on to block — it returns
-// STATUS_USER_APC (0xC0) so the caller can look at whatever the APC changed and
-// decide what to do next. That is the entire point of alertability; a caller
-// that did not want to be interrupted would pass Alertable = FALSE.
-//
-// We were delivering the APC and then blocking anyway, which silently deletes
-// the notification. The observed behaviour matches exactly: the loader issues
-// the read, the APC runs and moves the file request to state 2, and the loader
-// — never told anything happened — carries on waiting on events that only the
-// completion it was supposed to run would signal.
-//
-// Returns true if the caller should return immediately, with r3 already set.
-bool AlertableReturn(PPCContext& ctx, uint8_t* base, uint32_t alertable, const char* who)
-{
-    if (!wos::DeliverPendingApcs(ctx, base))
-        return false;
-    if (alertable == 0)
-        return false;
-
-    // Loud for the first few, because if this fires and nothing improves, the
-    // next question is whether the guest's wrapper handles 0xC0 at all — and
-    // that is only answerable if we know it was returned.
-    static std::atomic<uint64_t> s_count{0};
-    if (const uint64_t n = s_count.fetch_add(1, std::memory_order_relaxed) + 1; n <= 8)
-        printf("[sync] %s: APC delivered on an alertable wait -> STATUS_USER_APC "
-               "(#%llu, guest 0x%08X)\n",
-            who, (unsigned long long)n, uint32_t(ctx.lr) - 4);
-
-    ctx.r3.u64 = wos::kStatusUserApc;
-    return true;
 }
 
 bool WaitOnObject(uint32_t handleOrPtr, int64_t timeoutMs, const char* who)
