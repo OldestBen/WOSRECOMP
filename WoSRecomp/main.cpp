@@ -22,6 +22,7 @@
 // See docs/03-runtime-architecture.md.
 
 #include "guest.h"
+#include "gpu/pm4.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -902,6 +903,7 @@ int main(int argc, char** argv)
             wos::ReportD3DProbe(base);
             wos::ReportLoaderState(base);
             wos::ReportAlertableWaits();
+            wos::gpu::Pm4Report();
 
             // "Busy" here means *new* imports appearing, not calls happening.
             // A game polling the same three waits forever is not progressing,

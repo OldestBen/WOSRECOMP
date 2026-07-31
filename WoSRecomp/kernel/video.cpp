@@ -15,6 +15,7 @@
 #include "kernel_overrides.h"
 #include "guest.h"
 #include "../gpu/present.h"
+#include "../gpu/pm4.h"
 #include "object.h"
 
 #include <atomic>
@@ -263,17 +264,21 @@ void ExecutePackets(uint8_t* base, uint32_t bufferVirtual, uint32_t dwordCount, 
             {
                 const uint32_t value = wos::LoadU32(base, bufferVirtual + (i + 1 + j) * 4);
                 wos::StoreU32(base, kGpuRegisterBase + (firstReg + j) * 4, value);
+                wos::gpu::Pm4RecordRegister(firstReg + j, value);
             }
         }
         else if (type == 3)
         {
             const uint32_t opcode = (header >> 8) & 0x7F;
 
+            wos::gpu::Pm4RecordPacket(opcode, count);
+
             if (!g_seenType3[opcode & 0x7F])
             {
                 g_seenType3[opcode & 0x7F] = true;
-                printf("[gpu] first sighting: type3 op=0x%02X count=%u depth=%u:",
-                    opcode, count, depth);
+                const char* name = wos::gpu::Pm4OpcodeName(opcode);
+                printf("[gpu] first sighting: type3 op=0x%02X %s count=%u depth=%u:",
+                    opcode, name ? name : "(unknown)", count, depth);
                 for (uint32_t j = 1; j <= count && j <= 8 && i + j < dwordCount; ++j)
                     printf(" %08X", wos::LoadU32(base, bufferVirtual + (i + j) * 4));
                 if (count > 8)

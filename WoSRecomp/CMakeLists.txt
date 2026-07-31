@@ -57,6 +57,8 @@ set(WOS_SOURCES
     kernel/input.cpp
     # The renderer, such as it is: a window and a swapchain. See gpu/present.h.
     gpu/present.cpp
+    # PM4 naming and census — the renderer's to-do list, read off the game.
+    gpu/pm4.cpp
     kernel/d3d_probe.cpp
     # Reads the guest's own globals rather than reporting what the host did.
     kernel/state_probe.cpp
@@ -101,7 +103,9 @@ else()
 endif()
 
 add_executable(WoSRecomp ${WOS_SOURCES})
-target_include_directories(WoSRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/kernel")
+target_include_directories(WoSRecomp PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernel"
+    "${CMAKE_CURRENT_SOURCE_DIR}")
 
 target_compile_definitions(WoSRecomp PRIVATE NOMINMAX)
 target_link_libraries(WoSRecomp PRIVATE WoSRecompLib XenonUtils)

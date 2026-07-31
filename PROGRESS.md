@@ -69,7 +69,20 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-0. **Read `sub_82AC46C8`, the vblank handler.** The tripwire fired — call #1,
+0. **Batch the remaining reads.** Every blocker left needs guest code we have
+   not read, and reading them one per round has been the main cost. All four
+   in one go:
+   `tools/ask.sh --func 0x82AC46C8 --func 0x82ACECF0 --func 0x82AC4E48 --func 0x82AC0C10`
+   - `0x82AC46C8` — the vblank handler. Runs 60x/s, signals neither context
+     event. Verified reached; only its contents are unknown.
+   - `0x82ACECF0` — the graphics thread body. **One of the two threads is
+     already working**: 4102 loops on a 30 ms timeout at `bl@0x82ACEE14` and
+     takes the present branch on timeout, exactly as designed. 4103 is stuck
+     INFINITE at `bl@0x82ACED80`. Reading this says why the two differ.
+   - `0x82AC4E48` — the present path. Tripwired since early on and **has never
+     fired**, so presentation is gated before it.
+   - `0x82AC0C10` — where the main thread sits under `sub_82ABA260`.
+1. **Read `sub_82AC46C8`, the vblank handler.** The tripwire fired — call #1,
    #10, #100, #1000 — so the chain from the vblank timer through the interrupt
    callback into guest code is verified end to end, and the handler runs sixty
    times a second. It still does not signal ev5 (`0x4083FD7C`) or ev6

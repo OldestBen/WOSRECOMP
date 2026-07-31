@@ -3112,6 +3112,51 @@ The out-parameter is taken from whichever of r4/r5 looks like a guest pointer:
 this game's SDK generation used `(userIndex, flags, out)` but earlier ones used
 `(userIndex, out)`, and writing the state to a flags word would be silent.
 
+## One graphics thread is already working
+
+Worth stating plainly because it reframes the remaining blocker. From the wait
+census:
+
+```
+bl@0x82ACEE14 -> obj 0x4083FD7C  30ms      789 call(s), 789 timeout(s)
+bl@0x82ACED80 -> obj 0x4083FDCC  INFINITE    1 call(s),   1 timeout(s)
+```
+
+Thread 4102 (context `0x4083FD5C`) is **looping correctly** — waiting 30 ms,
+timing out, going round again, several hundred times. An earlier reading of
+`sub_82ACECF0` established that the frame-present branch is taken on the
+*timeout* result rather than on a signal, so that thread is doing exactly what
+it is supposed to.
+
+Thread 4103 (context `0x4083FDAC`) is the stuck one, blocked INFINITE at a
+different call site in the same function.
+
+So this is not "the graphics threads are deadlocked". It is one working thread
+and one stuck one, in the same function, on different waits — and the working
+one still never reaches `sub_82AC4E48`, whose tripwire has never fired in any
+run. Presentation is gated somewhere between the timeout branch and the present
+call, and `[d3d] +2ABE(present-gate) ever=0x14 bit1=never` says the gate is a
+bit that is never set.
+
+## A PM4 census, so the renderer has a specification
+
+`gpu/pm4.cpp` names type-3 opcodes and registers, counts every packet, and
+reports what the stream contains at each heartbeat.
+
+This is not a translator and does not pretend to be. The reason it exists is
+that translating PM4 means knowing which packets are draws and which registers
+carry the vertex format, shader addresses, render target and viewport — and
+every one of those questions currently costs a cross-reference against notes.
+Naming them once turns the existing log into a list of what a renderer actually
+has to implement **for this game**, rather than what the hardware supports in
+general. Reading the requirement off the title is more honest than deriving it
+from documentation and hoping the subset matches.
+
+The immediately useful number will be the draw count. If it stays at zero, the
+stream is still device setup and there is nothing for a translator to render
+even if one existed — which would settle whether renderer work can proceed in
+parallel with the loading blockage or has to wait behind it.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
