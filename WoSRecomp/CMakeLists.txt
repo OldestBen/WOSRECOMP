@@ -53,6 +53,7 @@ set(WOS_SOURCES
     kernel/video.cpp
     kernel/debug.cpp
     kernel/rtl.cpp
+    kernel/audio.cpp
     kernel/d3d_probe.cpp
     # Reads the guest's own globals rather than reporting what the host did.
     kernel/state_probe.cpp

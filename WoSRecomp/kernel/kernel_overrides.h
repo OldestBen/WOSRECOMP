@@ -166,3 +166,15 @@
 // ---------------------------------------------------------------------------
 #define WOS_IMPL_RtlMultiByteToUnicodeN 1
 #define WOS_IMPL_RtlUnicodeToMultiByteN 1
+
+// ---------------------------------------------------------------------------
+// Audio driver registration — kernel/audio.cpp
+//
+// Not sound output: the game's mixer thread retires immediately unless
+// registration succeeds, and a nop'd import thunk returns the first argument
+// in r3, which reads back as a failing NTSTATUS. See the comment in audio.cpp.
+// ---------------------------------------------------------------------------
+#define WOS_IMPL_XAudioRegisterRenderDriverClient 1
+#define WOS_IMPL_XAudioUnregisterRenderDriverClient 1
+#define WOS_IMPL_XAudioGetSpeakerConfig 1
+#define WOS_IMPL_XAudioGetVoiceCategoryVolume 1

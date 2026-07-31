@@ -2870,6 +2870,97 @@ which is useless for a site called forty million times with a mix of values.
 sees, with the Alertable flag and the guest call site. That replaces the
 guess with the values.
 
+## The APC route is closed by measurement
+
+The census, once it actually reached a digest:
+
+```
+[alertable] wait calls by import [alertable/not]:
+[alertable]   NtWaitForSingleObjectEx      0 / 100686   <- never alertable
+[alertable]   KeWaitForSingleObject        0 / 1749     <- never alertable
+[alertable]   NtWaitForMultipleObjectsEx   1 / 1
+[alertable]   KeDelayExecutionThread       0 / 17442560 <- never alertable
+```
+
+**One alertable wait in sixty seconds**, out of a hundred and twenty thousand.
+And the delivery landed exactly where predicted:
+
+```
+[apc] delivered at NtWaitForSingleObjectEx, Alertable=0 -> wait continues (NOT alertable)
+```
+
+So the console cannot be completing this I/O through a user APC at an alertable
+wait — the game essentially never performs one. Four rounds went into that line
+of enquiry and it is now closed by measurement rather than by argument.
+
+The `STATUS_USER_APC` return stays, because it is correct kernel semantics and
+costs nothing, but it is **dead code in practice** and should be read that way.
+Delivering the APC at *any* wait, which is what we do, is the behaviour that
+matters.
+
+## `Sleep(0)`, seventeen million times
+
+```
+[delay] interval 0 (0x0000000000000000) absolute/zero, Alertable=0, from guest 0x82B1A680
+```
+
+Exactly one distinct interval was ever seen at that site: **zero**. Not
+INFINITE, not a deadline — `Sleep(0)`, a deliberate yield-spin in the game's own
+retry loop. My `INT64_MIN` explanation was wrong: that path is never taken from
+this call site, which is why "fixing" it moved the count *up* rather than to
+zero.
+
+The unsigned-negation fix stays — negating `INT64_MIN` is undefined behaviour
+whatever else is true, and some other caller may yet hit it — but it explains
+nothing about this spin. The spin is the guest waiting for something, it is
+bounded (it stops after roughly one heartbeat window in every run), and it is
+not itself a bug.
+
+Two lessons worth keeping. A census that records only the *last* argument says
+nothing about a site called seventeen million times with mixed values; the fix
+was to print distinct values instead. And a plausible mechanism that predicts
+the wrong direction is refuted by that, not rescued by it — the count going up
+should have been treated as falsifying immediately.
+
+## First ring-buffer wrap ever observed
+
+```
+[gpu] write pointer 0x4003 exceeds modelled ring capacity 0x4000 — the size
+      argument encoding is wrong. Growing to 0x8000 and continuing.
+```
+
+After a dozen runs that never got far enough, a sixty-second run finally pushed
+the write pointer past the modelled capacity. The adaptive growth handled it, as
+designed. The raw size argument is still `0xE`, and the values written to
+`CP_RB_WPTR` climb monotonically well past any plausible ring size
+(`0x59D7` and beyond), so the guest appears to be publishing an unwrapped
+counter rather than a wrapped offset. That is a real lead on the encoding
+question, recorded rather than chased.
+
+## Audio registration has been failing on a technicality
+
+`XAudioRegisterRenderDriverClient` was never implemented, and an unimplemented
+import is rewritten by XenonUtils to `nop/nop/nop/blr`. The call returns with
+`r3` untouched — **still holding the first argument, a pointer** — which read
+back as an NTSTATUS is a large non-zero value, i.e. an error.
+
+So the game has been told audio registration failed on every run, and correctly
+declined to start its audio pipeline. That is why the mixer thread at
+`0x829F4C80` reads zero from `[[0x82F7701C]+0x12C]` and retires on its first
+iteration.
+
+This may also be why thread 4104 waits forever. It is created immediately after
+`SOUNDSRC_RVB.PCK` is opened, its context `0xB5401C98` is inside the sound heap,
+and it blocks on three events that only a running audio pipeline would signal.
+
+`kernel/audio.cpp` implements the registration for real — returning
+`STATUS_SUCCESS`, writing a recognisable driver handle to the out-parameter, and
+printing the client structure the game passes, since its layout is not
+confirmed and guessing at it is how the last several detours started. Speaker
+config now reports stereo instead of leaving the out-parameter unwritten, and
+voice-category volume returns 1.0f rather than a zero that would be
+indistinguishable from working-but-silent audio.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
