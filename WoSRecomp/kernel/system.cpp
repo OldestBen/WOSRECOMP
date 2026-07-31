@@ -304,14 +304,37 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
     const int64_t interval = static_cast<int64_t>(wos::LoadU64(base, intervalPtr));
     if (interval < 0)
     {
-        // Relative. A zero-length relative wait is a yield, not a sleep.
-        const int64_t hundredNs = -interval;
+        // Relative, in 100 ns units. Negate in UNSIGNED arithmetic.
+        //
+        // The guest's own Sleep wrapper at 0x82B1A630 encodes INFINITE as
+        //
+        //     82B1A660  lis r11,-32768   ; 0x80000000
+        //     82B1A668  stw r11,80(r1)   ; LARGE_INTEGER = 0x8000000000000000
+        //
+        // which is INT64_MIN. `-interval` on INT64_MIN is signed overflow —
+        // undefined behaviour, and in practice it stays negative, so the value
+        // handed to sleep_for was a negative duration and the call returned
+        // instantly. THAT is the five-million-calls-per-second spin that has
+        // been in every log for a dozen runs and got written off twice as
+        // background noise. An infinite sleep was being turned into a no-op by
+        // an overflow in our own arithmetic.
+        const uint64_t hundredNs = uint64_t(0) - uint64_t(interval);
+
+        // Cap before converting to nanoseconds, which would otherwise overflow
+        // for anything past ~292 years. INT64_MIN here means "forever"; a real
+        // forever would make the thread invisible to every diagnostic, so cap
+        // it at something long enough to be indistinguishable from forever for
+        // the game and short enough that the thread still comes back.
+        constexpr uint64_t kMaxHundredNs = 60ull * 60 * 10'000'000;   // 1 hour
+        const uint64_t capped = hundredNs > kMaxHundredNs ? kMaxHundredNs : hundredNs;
+
         wos::LogCallSite("KeDelayExecutionThread", callSite,
-            uint32_t(hundredNs / 10000));   // report in milliseconds
+            uint32_t(std::min<uint64_t>(hundredNs / 10000, 0xFFFFFFFEu)));
+
         if (hundredNs == 0)
             std::this_thread::yield();
         else
-            std::this_thread::sleep_for(std::chrono::nanoseconds(hundredNs * 100));
+            std::this_thread::sleep_for(std::chrono::nanoseconds(capped * 100));
     }
     else
     {

@@ -2741,6 +2741,92 @@ machinery rather than in sync.cpp, and all five wait imports — the four Nt/Ke
 waits plus `KeDelayExecutionThread` — route through it, so the Alertable value
 is reported in one place and one format.
 
+## Three functions read, and the spin finally explained
+
+### `sub_82B1A630` — the Sleep wrapper. Our own arithmetic was the spin.
+
+```
+82B1A648  cmpwi  cr6,r3,-1        ; r3 = milliseconds; -1 means INFINITE
+82B1A654  mulli  r11,r11,-10000   ; otherwise ms -> negative 100 ns units
+82B1A660  lis    r11,-32768       ; INFINITE: 0x80000000 in the high word
+82B1A668  stw    r11,80(r1)       ; LARGE_INTEGER = 0x8000000000000000
+82B1A678  mr     r4,r31           ; Alertable, straight from the caller
+82B1A680  bl     KeDelayExecutionThread
+82B1A68C  cmpwi  cr6,r3,257       ; 0x101 STATUS_ALERTED -> retry the wait
+82B1A694  cmpwi  cr6,r3,192       ; 0xC0  STATUS_USER_APC
+82B1A698  li     r3,192           ; -> returned to the caller
+```
+
+Two things fall out.
+
+**The guest expects alertable semantics.** It tests for `STATUS_ALERTED` and
+retries, and it tests for `STATUS_USER_APC` and propagates it. The theory that
+an alertable wait must return 0xC0 was right about the contract; what remains
+open is only whether `Alertable` is ever non-zero at the call, which the new
+census answers.
+
+**And the five-million-per-second spin was ours.** INFINITE is encoded as
+`0x8000000000000000` = `INT64_MIN`, and our implementation did:
+
+```cpp
+const int64_t hundredNs = -interval;      // UB when interval == INT64_MIN
+std::this_thread::sleep_for(std::chrono::nanoseconds(hundredNs * 100));
+```
+
+Negating `INT64_MIN` is signed overflow. In practice the value stays negative,
+`sleep_for` on a negative duration returns immediately, and an **infinite sleep
+became a no-op**. That is the spin that has been in every log for a dozen runs,
+that I wrote off as background noise once and as a frozen counter a second time,
+and that the absolute-deadline fix only partly masked (15.2M -> 2.0M -> 5.7M
+across runs, wandering because it was never the deadline path at all).
+
+Now negated in unsigned arithmetic and capped at one hour before the conversion
+to nanoseconds, which would otherwise overflow past ~292 years. A true forever
+would make the thread invisible to every diagnostic; an hour is
+indistinguishable from forever to the game and still comes back.
+
+### `sub_82B16CC8` — the multi-object wait wrapper. It does not swallow 0xC0.
+
+```
+82B16CE4  cmplwi cr6,r31,64        ; count > 64 -> STATUS_INVALID_PARAMETER
+82B16D28  rlwinm r29,r11,27,31,31  ; WaitType = (arg3 == 0) ? 1 : 0
+82B16D34  mr     r7,r30            ; Alertable, from its own arg5
+82B16D48  bl     NtWaitForMultipleObjectsEx
+82B16D50  blt    0x82B16D68        ; negative status -> report and return -1
+82B16D58  beq    cr6,0x82B16D70    ; not alertable -> return the status as-is
+82B16D5C  cmpwi  cr6,r3,257        ; 0x101 -> retry
+82B16D64  b      0x82B16D70        ; anything else, 0xC0 included, is returned
+```
+
+So it passes Alertable through and returns `STATUS_USER_APC` to its caller
+untouched. It is not the thing eating the notification.
+
+### `sub_82A7CD00` — thread 4104 is an ordinary worker loop
+
+```
+82A7CD1C  lwz r11,32(r31)   ; handles[0] = [ctx+0x20]
+82A7CD20  lwz r10,8(r31)    ; handles[1] = [ctx+0x08]
+82A7CD24  lwz r9,12(r31)    ; handles[2] = [ctx+0x0C]
+82A7CD38  lwz r6,28(r31)    ; timeout    = [ctx+0x1C]
+82A7CD44  bl  0x82B16D78    ; WaitAny of 3
+82A7CD54  bge cr6,0x82A7CD78 ; result 1 or 2 -> virtual call, loop
+82A7CD64  bl  0x82A7CC48     ; result 0      -> shutdown work, stop looping
+82A7CD70  cmplwi cr6,r3,258  ; 0x102 TIMEOUT -> virtual call, loop
+82A7CD88  bctrl              ; the periodic work, through the vtable
+```
+
+Nothing exotic: handle[0] is "quit", handles [1] and [2] are "work available",
+and a timeout also ticks the work. It blocks INFINITE because `[ctx+0x1C]`
+resolves to a null timeout pointer, so the timeout path never fires and it
+depends entirely on those events being signalled. Worth noting it calls
+`sub_82B16D78`, not `sub_82B16CC8` — a second wrapper immediately after the
+first in `.pdata`.
+
+One correction to record: the host stack frames like `sub_82A7CD00 +0x1D0` are
+**host** byte offsets from dbghelp into the recompiled C++ function, not guest
+offsets. `+0x1D0` is past the end of the 47-instruction guest function, so
+reading those as guest addresses would be nonsense.
+
 ## Open questions / blockers
 
 - **Three waits nobody signals.** Handles 0x00010050 and 0x00010024 via
