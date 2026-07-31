@@ -135,6 +135,10 @@ bool DeliverPendingApcs(PPCContext& ctx, uint8_t* base);
 // see the comment at the definition in kernel/file.cpp.
 bool AlertableReturn(PPCContext& ctx, uint8_t* base, uint32_t alertable, const char* who);
 
+// How many wait calls each import saw, split by whether they were alertable.
+// If nothing is ever alertable, the completion APC route is dead outright.
+void ReportAlertableWaits();
+
 // Watch the D3D device fields that gate the frame loop. Implemented in
 // kernel/d3d_probe.cpp — see the comment there for which fields and why.
 // The probe samples at 200 us so a flag set and cleared within one frame is

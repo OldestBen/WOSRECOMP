@@ -596,8 +596,54 @@ void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
 // wrong in the opposite direction to everything assumed so far.
 //
 // Returns true if the caller should return immediately, with r3 already set.
+// Which waits are alertable at all, counted per import.
+//
+// The APC question needs this and the delivery log cannot give it: the log only
+// fires when an APC happens to be pending, which is once per run. If NOTHING
+// the game waits on is ever alertable, the APC route is dead outright and no
+// amount of fixing the delivery point will help. That is worth knowing without
+// spending another build on it, and every wait import already calls through
+// here, so it costs one increment.
+struct AlertableStat { const char* who; uint64_t alertable; uint64_t plain; };
+std::mutex g_alertableMutex;
+std::vector<AlertableStat> g_alertableStats;
+
+void RecordAlertable(const char* who, uint32_t alertable)
+{
+    std::lock_guard<std::mutex> lock(g_alertableMutex);
+    for (auto& s : g_alertableStats)
+    {
+        if (s.who == who)
+        {
+            (alertable != 0 ? s.alertable : s.plain) += 1;
+            return;
+        }
+    }
+    g_alertableStats.push_back({ who, alertable != 0 ? 1ull : 0ull,
+                                      alertable != 0 ? 0ull : 1ull });
+}
+
+void ReportAlertableWaits()
+{
+    std::vector<AlertableStat> rows;
+    {
+        std::lock_guard<std::mutex> lock(g_alertableMutex);
+        rows = g_alertableStats;
+    }
+    if (rows.empty())
+        return;
+
+    printf("[alertable] wait calls by import [alertable/not]:\n");
+    for (const auto& r : rows)
+        printf("[alertable]   %-28s %llu / %llu%s\n", r.who,
+            (unsigned long long)r.alertable, (unsigned long long)r.plain,
+            r.alertable == 0 ? "   <- never alertable" : "");
+}
+
 bool AlertableReturn(PPCContext& ctx, uint8_t* base, uint32_t alertable, const char* who)
 {
+    RecordAlertable(who, alertable);
+
     if (!DeliverPendingApcs(ctx, base))
         return false;
 

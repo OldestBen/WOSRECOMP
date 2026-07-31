@@ -901,6 +901,7 @@ int main(int argc, char** argv)
             wos::ReportCallSites();
             wos::ReportD3DProbe(base);
             wos::ReportLoaderState(base);
+            wos::ReportAlertableWaits();
 
             // "Busy" here means *new* imports appearing, not calls happening.
             // A game polling the same three waits forever is not progressing,

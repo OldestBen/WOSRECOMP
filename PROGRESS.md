@@ -67,7 +67,15 @@ Full evidence for each of these is in
 
 ## Next Steps (in order)
 
-1. **Read the poll loop at guest `0x82B1A680`.** It called
+0. **Work forward from the stand-in, not backward from it.** The direct call to
+   `sub_82965488` unblocks the loader and the guest drives itself from there.
+   Finding what makes that call on the console is a correctness question, not a
+   progress blocker, and four rounds have gone into it. It is now a background
+   item — the census and the delivery log will answer it as a side effect of
+   runs done for other reasons. The next blockers are thread 4104 on
+   {`0x00010050`, `0x00010048`, `0x0001004C`} and the graphics thread on
+   `0x4083FDCC`.
+1. **(background) Read the poll loop at guest `0x82B1A680`.** It called
    `KeDelayExecutionThread` fifteen million times in five seconds while the
    request was outstanding and stopped dead when it completed, so it is the
    loader waiting on exactly this. Two bugs in our own implementation of that
