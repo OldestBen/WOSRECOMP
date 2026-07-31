@@ -7,6 +7,7 @@
 // from kernel code should go through here rather than being open-coded.
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -60,6 +61,32 @@ inline void StoreU16(uint8_t* base, uint32_t addr, uint16_t value)
 inline char* GuestPtr(uint8_t* base, uint32_t addr)
 {
     return reinterpret_cast<char*>(base + addr);
+}
+
+// Is an environment variable present? Only presence, never the value.
+//
+// Wrapped rather than calling getenv at each site because the MSVC CRT marks
+// getenv deprecated in favour of _dupenv_s, which allocates and has to be
+// freed. The documented hazard with getenv is keeping the returned pointer
+// across a later getenv/putenv; testing presence and discarding it on the same
+// line cannot hit that, so the suppression here is narrow and honest rather
+// than a blanket _CRT_SECURE_NO_WARNINGS.
+inline bool EnvIsSet(const char* name)
+{
+#if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 4996)
+#endif
+    const char* value = std::getenv(name);
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#elif defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
+    return value != nullptr;
 }
 
 // Xbox 360 NTSTATUS values we actually return.

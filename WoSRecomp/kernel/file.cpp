@@ -617,7 +617,7 @@ void QueueThreadApc(uint32_t routine, uint32_t context, uint32_t iosb)
 // Every link was verified except the call itself. This makes the call.
 void ProbeCompleteAsyncRequest(PPCContext& ctx, uint8_t* base)
 {
-    static const bool s_enabled = std::getenv("WOS_NO_COMPLETE_IO") == nullptr;
+    static const bool s_enabled = !wos::EnvIsSet("WOS_NO_COMPLETE_IO");
     if (!s_enabled)
         return;
 

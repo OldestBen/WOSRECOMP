@@ -105,6 +105,7 @@ echo
 echo "==> $total lines logged, $kept kept, $copied"
 echo "==> Full log: ${LOG#$REPO_ROOT/}"
 echo "==> Digest:   ${DIGEST#$REPO_ROOT/}"
+echo "==> Re-copy later with:  clip < ${DIGEST#$REPO_ROOT/}"
 
 if [ "$kept" -eq 0 ]; then
     echo

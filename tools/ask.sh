@@ -87,6 +87,9 @@ fi
 
 echo "==> ${#QUERIES[@]} quer$( [ "${#QUERIES[@]}" -eq 1 ] && echo y || echo ies ), $lines lines, $copied"
 echo "==> Saved: ${OUT#$REPO_ROOT/}"
+# The clipboard holds one thing. Running anything else that copies will
+# replace this, so say up front how to get it back.
+echo "==> Re-copy later with:  clip < ${OUT#$REPO_ROOT/}"
 
 # A very large paste is worth flagging before it lands in a chat window.
 if [ "$lines" -gt 1200 ]; then
