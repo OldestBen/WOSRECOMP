@@ -16,6 +16,7 @@ contradicts it, this wins and the other is stale history.
 
 | Layer | Where | Content |
 |---|---|---|
+| 0. The whole picture | [`docs/08-status.md`](docs/08-status.md) | Everything in one place: what works, what doesn't, what's been ruled out, effort remaining. For arriving cold or returning after a gap. |
 | 1. Orientation | **This file** § Current State | What's true right now. Rewritten in place. |
 | 2. Durable record | **This file** § Log · [`docs/05-findings-log.md`](docs/05-findings-log.md) | Dated project changes; WoS technical data with provenance. Appended. |
 | 3. Detail | [`docs/sessions/`](docs/sessions/) | Per-session blow-by-blow, incl. dead ends and unverified claims. One file per session. |
