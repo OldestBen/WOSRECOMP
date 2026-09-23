@@ -108,21 +108,30 @@ git submodule update --init --recursive
 
 ## Status
 
-🟡 **CPU code recompiles and compiles.** *Web of Shadows*'s PowerPC code goes
-from `default.xex` to a **192 MB native static library** — the XEX is analysed,
-all config addresses are found and verified, `XenonRecomp` runs to 100%, and the
-200 generated translation units compile with **zero errors** in 27 s.
+🟡 **It boots, opens a window, and presents at 60 Hz. Nothing of the game is
+drawn yet.**
+
+The PowerPC code recompiles cleanly into a native static library, and the
+runtime in [`WoSRecomp/`](WoSRecomp/) now implements **85 kernel imports**
+across 21 source files. A run reaches 77 distinct imports, starts twelve
+threads, drives a coherent GPU command stream, and loads real assets off disk —
+`game_shared.ini`, `amalga.toc`, 774 KB of a sound pack, and the first 512 KB of
+the main archive.
+
+There is a **1280×720 window** (Win32 + D3D11) presenting from the vblank
+thread. It shows a generated pattern, because the game has not yet reached its
+own present path: `VdSwap` has never been called in any run. The renderer —
+PM4 command translation, shader recompilation, texture formats, EDRAM — is not
+started, and is the overwhelming majority of the work remaining.
 
 Known defects: **33 switch sites** emit wrong control flow (down from 123).
 They compile fine but are incorrect at runtime.
 
-**Nothing executes yet.** The runtime in [`WoSRecomp/`](WoSRecomp/) is still
-empty, so nothing links against the recompiled code. That's the next milestone
-and the bulk of the remaining project.
-
-See [`PROGRESS.md`](PROGRESS.md) for current state and
-[`docs/05-findings-log.md`](docs/05-findings-log.md) for every address and
-measurement — **read those first** in a new session.
+**For the full picture** — what works, what doesn't, what has been ruled out,
+and honest effort estimates — read [`docs/08-status.md`](docs/08-status.md).
+[`PROGRESS.md`](PROGRESS.md) is the authority on current state, and
+[`docs/05-findings-log.md`](docs/05-findings-log.md) holds every address and
+measurement with its provenance.
 
 ## Credits & references
 
